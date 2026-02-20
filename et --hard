@@ -1,0 +1,107 @@
+[33mcommit fc652196fb3870738bcae1a9214d09190f934e2a[m[33m ([m[1;36mHEAD -> [m[1;32mcursor-adir[m[33m, [m[1;31morigin/cursor-adir[m[33m)[m
+Author: Harry-yyq <1724017964@qq.com>
+Date:   Fri Feb 20 15:49:43 2026 +0800
+
+    0202备份 准备重构adair代码
+
+[33mcommit ccb8b98e49614e07badd0641e5163fa7635c2f02[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmain[m[33m, [m[1;32madair-uie[m[33m)[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Wed Dec 24 16:40:53 2025 +0800
+
+    Update README
+
+[33mcommit 211cd11813e0513b951f4860ec0e21220319c1d3[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Tue Dec 23 23:03:43 2025 +0800
+
+    Add hyperlink to BioIR project in README
+
+[33mcommit 23725b7b50106cd7a08b7dc6371992e992c6fa45[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Tue Dec 23 23:02:57 2025 +0800
+
+    Update README
+
+[33mcommit ab14c4b960e3fa7000eabd6ec102eee49fd24488[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Wed May 7 21:58:36 2025 +0200
+
+    Update README.md
+
+[33mcommit 7edc41b768c1a8df3567ae9f9e8948293fc23f48[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Sun Mar 2 09:33:35 2025 +0100
+
+    Update README.md
+
+[33mcommit 50a85577452bd5ef461bdf2da44b61b034ffd45f[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Sun Mar 2 09:32:30 2025 +0100
+
+    Update README.md
+
+[33mcommit 67cdc58e29f9a59064fe32132363cdff016b69c1[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Wed Jan 22 19:04:24 2025 +0100
+
+    Update README.md
+
+[33mcommit d46fb475af26b6eb8177079a458c1cb9c67dbbaa[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Thu Apr 25 13:56:16 2024 +0400
+
+    Update README.md
+
+[33mcommit 69e13fbdaa6dc5312c084adbca97a92caa6efc0f[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Fri Mar 22 17:34:35 2024 +0400
+
+    Update README.md
+
+[33mcommit c7b3ff2d701295bc591ff5351567a7c3b9d5e9a3[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Fri Mar 22 14:31:08 2024 +0400
+
+    Update README.md
+
+[33mcommit 6986022a6b2c18c49e216253c87de70e1437c249[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Fri Mar 22 11:52:54 2024 +0400
+
+    Update model.py
+
+[33mcommit 50f8cafe8841915ccbf23bdae6bf90e14b1b92d4[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Fri Mar 22 08:40:15 2024 +0400
+
+    Update README.md
+
+[33mcommit 4dd73536168f0b90142d5fd0c2081e4aa9fa3d0c[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Fri Mar 22 08:32:41 2024 +0400
+
+    Update README.md
+
+[33mcommit dab504eec37fc609fda8a2f8ed7d2714e14f2dcb[m
+Author: Yuning Cui <cuiyuning16@gmail.com>
+Date:   Wed Mar 20 14:17:41 2024 +0400
+
+    Code Release
+
+[33mcommit c9e7c96e7d8c880237b4c3e4da1bb78ef650dce8[m
+Author: Yuning Cui <cuiyuning16@gmail.com>
+Date:   Wed Mar 20 03:23:15 2024 +0400
+
+    Update README.md
+
+[33mcommit 9c86ec24bafb9948089c30d0cc9c324903f029fe[m
+Author: Yuning Cui <cuiyuning16@gmail.com>
+Date:   Wed Mar 20 03:18:24 2024 +0400
+
+    Code Release
+
+[33mcommit ab6eca623351e0dbe334feb3603944d2114d7d88[m
+Author: Yuning Cui <94985227+c-yn@users.noreply.github.com>
+Date:   Tue Mar 19 22:11:52 2024 +0400
+
+    Initial commit
