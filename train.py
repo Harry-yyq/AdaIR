@@ -60,7 +60,16 @@ def main():
     
     model = AdaIRModel()
     
-    trainer = pl.Trainer( max_epochs=opt.epochs,accelerator="gpu",devices=opt.num_gpus,strategy="ddp_find_unused_parameters_true",logger=logger,callbacks=[checkpoint_callback])
+    trainer = pl.Trainer(
+        max_epochs=opt.epochs,
+        accelerator="gpu",
+        devices=opt.num_gpus,
+        strategy="ddp_find_unused_parameters_true",
+        logger=logger,
+        callbacks=[checkpoint_callback],
+        precision=opt.precision,
+        accumulate_grad_batches=opt.accumulate_grad_batches,
+    )
     trainer.fit(model=model, train_dataloaders=trainloader)
 
 
