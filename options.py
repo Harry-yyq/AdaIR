@@ -31,7 +31,9 @@ parser.add_argument('--output_path', type=str, default="output/", help='output s
 parser.add_argument('--ckpt_path', type=str, default="ckpt/Denoise/", help='checkpoint save path')
 parser.add_argument("--wblogger",type=str,default="AdaIR",help = "Determine to log to wandb or not and the project name")
 parser.add_argument("--ckpt_dir",type=str,default="AdaIR",help = "Name of the Directory where the checkpoint is to be saved")
-parser.add_argument("--num_gpus",type=int,default= 4, help = "Number of GPUs to use for training")
+parser.add_argument("--num_gpus", type=int, default=8, help="Number of GPUs to use for training")
+parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Gradient accumulation steps (effective batch = batch_size * accumulate_grad_batches * num_gpus)")
+parser.add_argument("--precision", type=str, default="16-mixed", choices=["32", "16-mixed", "bf16-mixed"], help="Training precision; 16-mixed reduces GPU memory")
 
 options = parser.parse_args()
 

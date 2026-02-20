@@ -133,7 +133,7 @@ if __name__ == '__main__':
 
     print("CKPT name : {}".format(ckpt_path))
 
-    net  = AdaIRModel().load_from_checkpoint(ckpt_path).cuda()
+    net  = AdaIRModel.load_from_checkpoint(ckpt_path).cuda()
     net.eval()
 
     if testopt.mode == 0:
