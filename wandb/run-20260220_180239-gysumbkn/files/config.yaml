@@ -1,0 +1,99 @@
+_wandb:
+    value:
+        cli_version: 0.24.1
+        e:
+            nnlptw0zy22odrw34mqriicwj6hbhlba:
+                codePath: train.py
+                codePathLocal: train.py
+                cpu_count: 80
+                cpu_count_logical: 160
+                cudaVersion: "12.1"
+                disk:
+                    /:
+                        total: "1885942272000"
+                        used: "1712456933376"
+                email: yiqiangyaoharry@gmail.com
+                executable: /root/anaconda3/envs/AdaIR/bin/python
+                git:
+                    commit: 23725b7b50106cd7a08b7dc6371992e992c6fa45
+                    remote: https://github.com/Harry-yyq/AdaIR.git
+                gpu: NVIDIA A800-SXM4-80GB
+                gpu_count: 8
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-a2155521-e896-2a81-079f-5f69a859b7c3
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-1ca50c5a-7917-8570-d862-1cdcdced46ab
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-7fcbe515-6f25-6c65-d56b-ba67a66dcdd7
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-6ce176f0-256e-8d3c-b9b5-15cb3c8ac010
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-de40636d-124b-050c-bac0-2133e7a6c7fa
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-3098ad04-5aad-42f2-6ad8-656dec8e310e
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-6370d9c2-f812-a5a8-fc53-b4c474a71724
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-f5dfcaf3-4868-ab3c-a078-ecdf6f3e2c9d
+                host: node45
+                memory:
+                    total: "540656128000"
+                os: Linux-5.4.0-100-generic-x86_64-with-glibc2.17
+                program: train.py
+                python: CPython 3.8.20
+                root: .
+                startedAt: "2026-02-20T10:02:39.796140Z"
+                writerId: nnlptw0zy22odrw34mqriicwj6hbhlba
+        m:
+            - "1": trainer/global_step
+              "6":
+                - 3
+              "7": []
+            - "2": '*'
+              "5": 1
+              "6":
+                - 1
+              "7": []
+        python_version: 3.8.20
+        t:
+            "1":
+                - 1
+                - 41
+                - 106
+            "2":
+                - 1
+                - 41
+                - 106
+            "3":
+                - 7
+                - 13
+                - 66
+            "4": 3.8.20
+            "5": 0.24.1
+            "12": 0.24.1
+            "13": linux-x86_64
