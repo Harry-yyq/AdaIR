@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,8 +20,9 @@ from torchmetrics import MeanMetric
 
 
 class AdaIRModel(pl.LightningModule):
-    def __init__(self):
+    def __init__(self, lr=2e-4):
         super().__init__()
+        self.lr = lr
         self.net = AdaIR(decoder=True)
         self.loss_fn = nn.L1Loss()
         # 用于汇总每个 epoch 的均值（DDP 下会跨卡同步）
@@ -71,10 +73,10 @@ class AdaIRModel(pl.LightningModule):
         lr = scheduler.get_lr()
     
     def configure_optimizers(self):
-        optimizer = optim.AdamW(self.parameters(), lr=2e-4)
-        scheduler = LinearWarmupCosineAnnealingLR(optimizer=optimizer,warmup_epochs=15,max_epochs=180)
+        optimizer = optim.AdamW(self.parameters(), lr=self.lr)
+        scheduler = LinearWarmupCosineAnnealingLR(optimizer=optimizer, warmup_epochs=15, max_epochs=180)
 
-        return [optimizer],[scheduler]
+        return [optimizer], [scheduler]
 
 
 def main():
@@ -99,7 +101,18 @@ def main():
         logger = TensorBoardLogger(save_dir = "logs/")
 
     if getattr(opt, "train_uie_only", False):
-        train_dataset, val_dataset, train_sampler = get_uie_train_val_datasets_and_sampler(opt, train_ratio=0.9)
+        train_dataset, val_dataset, train_sampler, uie_stats = get_uie_train_val_datasets_and_sampler(opt, train_ratio=0.9)
+        # 仅在 rank 0 打印 UIE 数据集统计，便于校验混合与 4:4:2
+        if int(os.environ.get("RANK", 0)) == 0:
+            n_train = uie_stats["n_train"]
+            n_uieb, n_lsui, n_euvp = uie_stats["n_uieb"], uie_stats["n_lsui"], uie_stats["n_euvp"]
+            p_uieb = 100.0 * n_uieb / n_train if n_train else 0
+            p_lsui = 100.0 * n_lsui / n_train if n_train else 0
+            p_euvp = 100.0 * n_euvp / n_train if n_train else 0
+            print("[UIE] train: {} (UIEB: {} [{:.1f}%] | LSUI: {} [{:.1f}%] | EUVP: {} [{:.1f}%]) val: {}".format(
+                n_train, n_uieb, p_uieb, n_lsui, p_lsui, n_euvp, p_euvp, uie_stats["n_val"]))
+            if getattr(opt, "num_gpus", 1) > 1:
+                print("[UIE] num_gpus>1: 使用 DistributedSampler，batch 内比例非严格 4:4:2；单卡时才会按 4:4:2 采样")
         # 单卡用 WeightedRandomSampler(40:40:20)；多卡不传 sampler，由 Lightning 在 DDP 下自动加 DistributedSampler
         use_sampler = getattr(opt, "num_gpus", 1) == 1
         trainloader = DataLoader(
@@ -119,7 +132,16 @@ def main():
         val_loader = None
 
     checkpoint_callback = ModelCheckpoint(dirpath=opt.ckpt_dir, every_n_epochs=1, save_top_k=-1)
-    model = AdaIRModel()
+    # 单独保存效果最好的 1 个 ckpt（按 epoch 平均 PSNR 最高）
+    best_ckpt_callback = ModelCheckpoint(
+        dirpath=opt.ckpt_dir,
+        filename="best-{epoch:03d}-psnr={epoch/train_psnr:.4f}",
+        monitor="epoch/train_psnr",
+        mode="max",
+        save_top_k=1,
+        save_last=False,
+    )
+    model = AdaIRModel(lr=getattr(opt, "lr", 2e-4))
 
     if getattr(opt, "resume_ckpt", None):
         info = load_adair_ckpt_for_uie_finetune(
@@ -138,9 +160,10 @@ def main():
         devices=opt.num_gpus,
         strategy="ddp_find_unused_parameters_true",
         logger=logger,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, best_ckpt_callback],
         precision=opt.precision,
         accumulate_grad_batches=opt.accumulate_grad_batches,
+        gradient_clip_val=opt.grad_clip if getattr(opt, "grad_clip", 0.5) > 0 else None,
     )
     trainer.fit(**fit_kw)
 

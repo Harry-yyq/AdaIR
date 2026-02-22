@@ -186,7 +186,18 @@ def build_uie_mixed_pool_and_split(args, train_ratio=0.9, seed=None):
     val_samples = all_samples[n_train:]
     train_source_ids = [s["source_id"] for s in train_samples]
 
-    return train_samples, val_samples, train_source_ids
+    # 各来源在 train 中的样本数（用于校验 4:4:2）
+    n_uieb_train = sum(1 for s in train_samples if s["source_id"] == UIE_SOURCE_UIEB)
+    n_lsui_train = sum(1 for s in train_samples if s["source_id"] == UIE_SOURCE_LSUI)
+    n_euvp_train = sum(1 for s in train_samples if s["source_id"] == UIE_SOURCE_EUVP)
+    _uie_stats = {
+        "n_train": n_train,
+        "n_val": len(val_samples),
+        "n_uieb": n_uieb_train,
+        "n_lsui": n_lsui_train,
+        "n_euvp": n_euvp_train,
+    }
+    return train_samples, val_samples, train_source_ids, _uie_stats
 
 
 def build_uie_weighted_sampler(train_source_ids, num_samples=None, replacement=True):
@@ -217,8 +228,9 @@ def get_uie_train_val_datasets_and_sampler(args, train_ratio=0.9):
         train_dataset: UnderwaterDataset for training
         val_dataset: UnderwaterDataset for validation (can be empty)
         train_sampler: WeightedRandomSampler for train (use with DataLoader(..., sampler=train_sampler, shuffle=False)
+        uie_stats: dict with n_train, n_val, n_uieb, n_lsui, n_euvp for logging
     """
-    train_samples, val_samples, train_source_ids = build_uie_mixed_pool_and_split(
+    train_samples, val_samples, train_source_ids, uie_stats = build_uie_mixed_pool_and_split(
         args, train_ratio=train_ratio, seed=42
     )
     train_dataset = UnderwaterDataset(train_samples, args.patch_size)
@@ -226,7 +238,7 @@ def get_uie_train_val_datasets_and_sampler(args, train_ratio=0.9):
     train_sampler = build_uie_weighted_sampler(
         train_source_ids, num_samples=len(train_dataset), replacement=True
     )
-    return train_dataset, val_dataset, train_sampler
+    return train_dataset, val_dataset, train_sampler, uie_stats
 
     
 class AdaIRTrainDataset(Dataset):

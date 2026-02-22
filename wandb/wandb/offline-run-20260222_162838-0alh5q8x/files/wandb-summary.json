@@ -1,0 +1,1 @@
+{"_runtime": 7930, "_step": 707, "step/train_loss": 66.10234832763672, "step/train_psnr": 6.855086803436279, "step/train_ssim": 0.05618523061275482, "epoch": 149, "trainer/global_step": 27899, "_timestamp": 1771756848.3113086, "epoch/train_loss": 65.49244689941406, "epoch/train_psnr": 6.883939266204834, "epoch/train_ssim": 0.08731638640165329}
