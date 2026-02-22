@@ -1,244 +1,115 @@
 import os
-import numpy as np
 import argparse
-import subprocess
-from tqdm import tqdm
-
+import numpy as np
 import torch
-import torch.nn as nn 
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
+from PIL import Image
+from tqdm import tqdm
 import lightning.pytorch as pl
 
-from utils.dataset_utils import DenoiseTestDataset, DerainDehazeDataset
-from utils.val_utils import AverageMeter, compute_psnr_ssim
-from utils.image_io import save_image_tensor
 from net.model import AdaIR
+from utils.val_utils import AverageMeter, compute_psnr_ssim
+from utils.image_utils import crop_img
 
 
 class AdaIRModel(pl.LightningModule):
     def __init__(self):
         super().__init__()
         self.net = AdaIR(decoder=True)
-        self.loss_fn  = nn.L1Loss()
-    
-    def forward(self,x):
+
+    def forward(self, x):
         return self.net(x)
-    
-    def training_step(self, batch, batch_idx):
-        # training_step defines the train loop.
-        # it is independent of forward
-        ([clean_name, de_id], degrad_patch, clean_patch) = batch
-        restored = self.net(degrad_patch)
-
-        loss = self.loss_fn(restored,clean_patch)
-        # Logging to TensorBoard (if installed) by default
-        self.log("train_loss", loss)
-        return loss
-    
-    def lr_scheduler_step(self,scheduler,metric):
-        scheduler.step(self.current_epoch)
-        lr = scheduler.get_lr()
-    
-    def configure_optimizers(self):
-        optimizer = optim.AdamW(self.parameters(), lr=2e-4)
-        scheduler = LinearWarmupCosineAnnealingLR(optimizer=optimizer,warmup_epochs=15,max_epochs=180)
-
-        return [optimizer],[scheduler]
 
 
-def test_Denoise(net, dataset, sigma=15):
-    output_path = testopt.output_path + 'denoise/' + str(sigma) + '/'
-    subprocess.check_output(['mkdir', '-p', output_path])
-    
-    dataset.set_sigma(sigma)
-    testloader = DataLoader(dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=0)
+class UIETestDataset(Dataset):
+    """UIE test dataset: input/ and target/ with same filenames."""
 
+    def __init__(self, input_dir, target_dir):
+        self.input_dir = input_dir
+        self.target_dir = target_dir
+        self.ids = []
+        for f in os.listdir(input_dir):
+            if f.startswith(".") or f.startswith("__MACOSX") or os.path.isdir(os.path.join(input_dir, f)):
+                continue
+            if not f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
+                continue
+            if os.path.isfile(os.path.join(target_dir, f)):
+                self.ids.append(f)
+
+    def __len__(self):
+        return len(self.ids)
+
+    def __getitem__(self, idx):
+        fname = self.ids[idx]
+        degrad = np.array(Image.open(os.path.join(self.input_dir, fname)).convert("RGB"))
+        clean = np.array(Image.open(os.path.join(self.target_dir, fname)).convert("RGB"))
+        degrad = crop_img(degrad, base=16)
+        clean = crop_img(clean, base=16)
+        degrad = torch.from_numpy(degrad.transpose(2, 0, 1)).float() / 255.0
+        clean = torch.from_numpy(clean.transpose(2, 0, 1)).float() / 255.0
+        name = os.path.splitext(fname)[0]
+        return [name], degrad.unsqueeze(0), clean.unsqueeze(0)
+
+
+def test_UIE(net, dataset, dataset_name="UIE"):
     psnr = AverageMeter()
     ssim = AverageMeter()
-
+    net.eval()
     with torch.no_grad():
-        for ([clean_name], degrad_patch, clean_patch) in tqdm(testloader):
-            degrad_patch, clean_patch = degrad_patch.cuda(), clean_patch.cuda()
-
-            restored = net(degrad_patch)
-            temp_psnr, temp_ssim, N = compute_psnr_ssim(restored, clean_patch)
-
+        for i in tqdm(range(len(dataset)), desc=dataset_name):
+            [name], degrad, clean = dataset[i]
+            degrad = degrad.cuda()
+            clean = clean.cuda()
+            restored = net(degrad)
+            restored = torch.clamp(restored, 0, 1)
+            temp_psnr, temp_ssim, N = compute_psnr_ssim(restored, clean)
             psnr.update(temp_psnr, N)
             ssim.update(temp_ssim, N)
-            save_image_tensor(restored, output_path + clean_name[0] + '.png')
-
-        print("Denoise sigma=%d: psnr: %.2f, ssim: %.4f" % (sigma, psnr.avg, ssim.avg))
-
-
-def test_Derain_Dehaze(net, dataset, task="derain"):
-    output_path = testopt.output_path + task + '/'
-    subprocess.check_output(['mkdir', '-p', output_path])
-
-    dataset.set_dataset(task)
-    testloader = DataLoader(dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=0)
-
-    psnr = AverageMeter()
-    ssim = AverageMeter()
-
-    with torch.no_grad():
-        for ([degraded_name], degrad_patch, clean_patch) in tqdm(testloader):
-            degrad_patch, clean_patch = degrad_patch.cuda(), clean_patch.cuda()
-
-            restored = net(degrad_patch)
-
-            temp_psnr, temp_ssim, N = compute_psnr_ssim(restored, clean_patch)
-            psnr.update(temp_psnr, N)
-            ssim.update(temp_ssim, N)
-
-            save_image_tensor(restored, output_path + degraded_name[0] + '.png')
-        print("PSNR: %.2f, SSIM: %.4f" % (psnr.avg, ssim.avg))
+    print("{}: PSNR: {:.2f}, SSIM: {:.4f}".format(dataset_name, psnr.avg, ssim.avg))
+    return psnr.avg, ssim.avg
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
-    # Input Parameters
-    parser.add_argument('--cuda', type=int, default=0)
-    parser.add_argument('--mode', type=int, default=6,
-                        help='0 for denoise, 1 for derain, 2 for dehaze, 3 for deblur, 4 for enhance, 5 for all-in-one (three tasks), 6 for all-in-one (five tasks)')
-    
-    parser.add_argument('--gopro_path', type=str, default="data/test/deblur/", help='save path of test hazy images')
-    parser.add_argument('--enhance_path', type=str, default="data/test/enhance/", help='save path of test hazy images')
-    parser.add_argument('--denoise_path', type=str, default="data/test/denoise/", help='save path of test noisy images')
-    parser.add_argument('--derain_path', type=str, default="data/test/derain/", help='save path of test raining images')
-    parser.add_argument('--dehaze_path', type=str, default="data/test/dehaze/", help='save path of test hazy images')
+    parser.add_argument("--cuda", type=int, default=0)
+    parser.add_argument("--ckpt_path", type=str, default="ckpt/adair5d.ckpt", help="checkpoint path")
+    parser.add_argument("--uie_test_dir", type=str, default="data/test/uie/",
+                        help="UIE test root, expect uieb/lsui/euvp with input/ and target/")
+    args = parser.parse_args()
 
-    parser.add_argument('--output_path', type=str, default="AdaIR_results/", help='output save path')
-    parser.add_argument('--ckpt_name', type=str, default="adair5d.ckpt", help='checkpoint save path')
-    testopt = parser.parse_args()
-    
-    np.random.seed(0)
-    torch.manual_seed(0)
-    torch.cuda.set_device(testopt.cuda)
+    torch.cuda.set_device(args.cuda)
 
-    ckpt_path = "ckpt/" + testopt.ckpt_name
-
-    denoise_splits = ["bsd68/"]
-    derain_splits = ["Rain100L/"]
-    deblur_splits = ["gopro/"]
-    enhance_splits = ["lol/"]
-
-    denoise_tests = []
-    derain_tests = []
-
-    base_path = testopt.denoise_path
-    for i in denoise_splits:
-        testopt.denoise_path = os.path.join(base_path,i)
-        denoise_testset = DenoiseTestDataset(testopt)
-        denoise_tests.append(denoise_testset)
-
-    print("CKPT name : {}".format(ckpt_path))
-
-    net  = AdaIRModel.load_from_checkpoint(ckpt_path).cuda()
+    net = AdaIRModel.load_from_checkpoint(args.ckpt_path).net.cuda()
     net.eval()
 
-    if testopt.mode == 0:
-        for testset,name in zip(denoise_tests,denoise_splits) :
-            print('Start {} testing Sigma=15...'.format(name))
-            test_Denoise(net, testset, sigma=15)
+    # 相对路径以脚本所在目录为基准，避免 cwd 不同导致找不到数据
+    uie_dir = args.uie_test_dir
+    if not os.path.isabs(uie_dir):
+        _root = os.path.dirname(os.path.abspath(__file__))
+        uie_dir = os.path.normpath(os.path.join(_root, uie_dir))
+    base = uie_dir.rstrip(os.sep) + os.sep
+    results = {}
+    for name, sub in [("UIEB", "uieb"), ("LSUI", "lsui"), ("EUVP", "euvp")]:
+        inp = os.path.join(base, sub, "input")
+        tgt = os.path.join(base, sub, "target")
+        if not os.path.isdir(inp) or not os.path.isdir(tgt):
+            print("{}: skip (missing input/ or target/)".format(name))
+            continue
+        dataset = UIETestDataset(inp, tgt)
+        if len(dataset) == 0:
+            print("{}: skip (no pairs)".format(name))
+            continue
+        psnr, ssim = test_UIE(net, dataset, dataset_name=name)
+        results[name] = (psnr, ssim)
 
-            print('Start {} testing Sigma=25...'.format(name))
-            test_Denoise(net, testset, sigma=25)
+    if results:
+        print("-" * 40)
+        print("Task 7 UIE Test Summary:")
+        for name in ["UIEB", "LSUI", "EUVP"]:
+            if name in results:
+                p, s = results[name]
+                print("  {}: PSNR: {:.2f}, SSIM: {:.4f}".format(name, p, s))
 
-            print('Start {} testing Sigma=50...'.format(name))
-            test_Denoise(net, testset, sigma=50)
 
-    elif testopt.mode == 1:
-        print('Start testing rain streak removal...')
-        derain_base_path = testopt.derain_path
-        for name in derain_splits:
-            print('Start testing {} rain streak removal...'.format(name))
-            testopt.derain_path = os.path.join(derain_base_path,name)
-            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15)
-            test_Derain_Dehaze(net, derain_set, task="derain")
-
-    elif testopt.mode == 2:
-        print('Start testing SOTS...')
-        derain_base_path = testopt.derain_path
-        name = derain_splits[0]
-        testopt.derain_path = os.path.join(derain_base_path,name)
-        derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15)
-        test_Derain_Dehaze(net, derain_set, task="dehaze")
-
-    elif testopt.mode == 3:
-        print('Start testing GOPRO...')
-        deblur_base_path = testopt.gopro_path
-        name = deblur_splits[0]
-        testopt.gopro_path = os.path.join(deblur_base_path,name)
-        derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15, task='deblur')
-        test_Derain_Dehaze(net, derain_set, task="deblur")
-
-    elif testopt.mode == 4:
-        print('Start testing LOL...')
-        enhance_base_path = testopt.enhance_path
-        name = derain_splits[0]
-        testopt.enhance_path = os.path.join(enhance_base_path,name, task='enhance')
-        derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15)
-        test_Derain_Dehaze(net, derain_set, task="enhance")
-
-    elif testopt.mode == 5:
-        for testset,name in zip(denoise_tests,denoise_splits) :
-            print('Start {} testing Sigma=15...'.format(name))
-            test_Denoise(net, testset, sigma=15)
-
-            print('Start {} testing Sigma=25...'.format(name))
-            test_Denoise(net, testset, sigma=25)
-
-            print('Start {} testing Sigma=50...'.format(name))
-            test_Denoise(net, testset, sigma=50)
-
-        derain_base_path = testopt.derain_path
-        print(derain_splits)
-        for name in derain_splits:
-
-            print('Start testing {} rain streak removal...'.format(name))
-            testopt.derain_path = os.path.join(derain_base_path,name)
-            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55)
-            test_Derain_Dehaze(net, derain_set, task="derain")
-
-        print('Start testing SOTS...')
-        test_Derain_Dehaze(net, derain_set, task="dehaze")
-
-    elif testopt.mode == 6:
-        for testset,name in zip(denoise_tests,denoise_splits) :
-            print('Start {} testing Sigma=15...'.format(name))
-            test_Denoise(net, testset, sigma=15)
-
-            print('Start {} testing Sigma=25...'.format(name))
-            test_Denoise(net, testset, sigma=25)
-
-            print('Start {} testing Sigma=50...'.format(name))
-            test_Denoise(net, testset, sigma=50)
-
-        derain_base_path = testopt.derain_path
-        print(derain_splits)
-        for name in derain_splits:
-
-            print('Start testing {} rain streak removal...'.format(name))
-            testopt.derain_path = os.path.join(derain_base_path,name)
-            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55)
-            test_Derain_Dehaze(net, derain_set, task="derain")
-
-        print('Start testing SOTS...')
-        test_Derain_Dehaze(net, derain_set, task="dehaze")
-
-        deblur_base_path = testopt.gopro_path
-        for name in deblur_splits:
-            print('Start testing GOPRO...')
-
-            # print('Start testing {} rain streak removal...'.format(name))
-            testopt.gopro_path = os.path.join(deblur_base_path,name)
-            deblur_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55, task='deblur')
-            test_Derain_Dehaze(net, deblur_set, task="deblur")
-
-        enhance_base_path = testopt.enhance_path
-        for name in enhance_splits:
-
-            print('Start testing LOL...')
-            testopt.enhance_path = os.path.join(enhance_base_path,name)
-            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55, task='enhance')
-            test_Derain_Dehaze(net, derain_set, task="enhance")
+if __name__ == "__main__":
+    main()
