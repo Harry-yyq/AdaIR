@@ -11,6 +11,223 @@ import torch
 from utils.image_utils import random_augmentation, crop_img
 from utils.degradation_utils import Degradation
 
+
+# --------------- Task 7: Underwater Image Enhancement (UIE) ---------------
+# Task ID for UIE in AdaIR (7th category)
+UIE_TASK_ID = 7
+
+# Target batch ratio for WeightedRandomSampler: UIEB : LSUI : EUVP = 40% : 40% : 20%
+UIE_SOURCE_RATIOS = (0.4, 0.4, 0.2)  # (UIEB, LSUI, EUVP)
+UIE_SOURCE_UIEB, UIE_SOURCE_LSUI, UIE_SOURCE_EUVP = 0, 1, 2
+
+
+def load_uieb_test_ids(test_list_path):
+    """Read test_list.txt and return a set of basenames to exclude from UIEB train/val.
+    File format: one image filename per line (e.g. '890-1.png' or '890-1').
+    """
+    if not os.path.isfile(test_list_path):
+        return set()
+    exclude = set()
+    with open(test_list_path, "r", encoding="utf-8") as f:
+        for line in f:
+            name = line.strip()
+            if not name:
+                continue
+            # normalize to basename without path
+            base = os.path.basename(name)
+            exclude.add(base)
+            # also add without extension so '890-1' matches '890-1.png'
+            base_no_ext = os.path.splitext(base)[0]
+            exclude.add(base_no_ext)
+    return exclude
+
+
+def _ensure_min_size(img, patch_size):
+    """Pad or resize so that H, W >= patch_size. img: numpy HWC, RGB [0,255]. Returns HWC."""
+    h, w = img.shape[0], img.shape[1]
+    if h >= patch_size and w >= patch_size:
+        return img
+    scale = 1.0
+    if h < patch_size or w < patch_size:
+        scale = max(patch_size / h, patch_size / w)
+    new_h = max(int(round(h * scale)), patch_size)
+    new_w = max(int(round(w * scale)), patch_size)
+    img = np.array(
+        Image.fromarray(img.astype(np.uint8)).resize((new_w, new_h), Image.BILINEAR)
+    )
+    return img
+
+
+def _uie_augment_pair(deg_patch, clean_patch):
+    """Apply same RandomHorizontalFlip, RandomVerticalFlip, RandomRotation(90) to both. NO ColorJitter."""
+    # Use 1-7 only: mode 0 in data_augmentation uses .numpy() which fails on ndarray
+    mode = random.randint(1, 7)
+    from utils.image_utils import data_augmentation
+    deg_patch = data_augmentation(deg_patch, mode)
+    clean_patch = data_augmentation(clean_patch, mode)
+    return deg_patch, clean_patch
+
+
+class UnderwaterDataset(Dataset):
+    """Unified dataset for Task 7 (Underwater Image Enhancement).
+    Each sample: (degraded_patch, clean_patch) both RGB [0,1] tensors, task_id=7.
+    Returns format compatible with AdaIRTrainDataset: ([clean_name, task_id], degrad_patch, clean_patch).
+    """
+
+    def __init__(self, sample_list, patch_size, degraded_subdir="input", ref_subdir="ref"):
+        """
+        sample_list: list of dicts with keys 'degrad_path', 'ref_path', 'source_id' (0=UIEB, 1=LSUI, 2=EUVP).
+        patch_size: int.
+        degraded_subdir / ref_subdir: optional subdir names if paths are dataset roots.
+        """
+        self.sample_list = sample_list
+        self.patch_size = patch_size
+        self.degraded_subdir = degraded_subdir
+        self.ref_subdir = ref_subdir
+        self.to_tensor = ToTensor()
+
+    def __len__(self):
+        return len(self.sample_list)
+
+    def __getitem__(self, idx):
+        item = self.sample_list[idx]
+        degrad_path = item["degrad_path"]
+        ref_path = item["ref_path"]
+
+        degrad_img = np.array(Image.open(degrad_path).convert("RGB"))
+        clean_img = np.array(Image.open(ref_path).convert("RGB"))
+
+        degrad_img = _ensure_min_size(degrad_img, self.patch_size)
+        clean_img = _ensure_min_size(clean_img, self.patch_size)
+
+        H, W = degrad_img.shape[0], degrad_img.shape[1]
+        if H <= self.patch_size or W <= self.patch_size:
+            # edge case: exactly patch_size
+            top, left = 0, 0
+        else:
+            top = random.randint(0, H - self.patch_size)
+            left = random.randint(0, W - self.patch_size)
+        degrad_patch = degrad_img[top : top + self.patch_size, left : left + self.patch_size]
+        clean_patch = clean_img[top : top + self.patch_size, left : left + self.patch_size]
+
+        degrad_patch, clean_patch = _uie_augment_pair(degrad_patch, clean_patch)
+        degrad_patch = np.ascontiguousarray(degrad_patch)
+        clean_patch = np.ascontiguousarray(clean_patch)
+
+        degrad_patch = self.to_tensor(degrad_patch)
+        clean_patch = self.to_tensor(clean_patch)
+
+        clean_name = os.path.splitext(os.path.basename(ref_path))[0]
+        return [clean_name, UIE_TASK_ID], degrad_patch, clean_patch
+
+
+def _collect_pairs_from_dir(root_dir, degraded_subdir="input", ref_subdir="ref", source_id=0, exclude_basenames=None):
+    """Collect (degrad_path, ref_path, source_id) from root_dir/input and root_dir/ref. Same filenames."""
+    degrad_dir = os.path.join(root_dir, degraded_subdir)
+    ref_dir = os.path.join(root_dir, ref_subdir)
+    if not os.path.isdir(degrad_dir) or not os.path.isdir(ref_dir):
+        return []
+    pairs = []
+    for fname in os.listdir(degrad_dir):
+        if fname.startswith(".") or fname.startswith("__MACOSX") or os.path.isdir(os.path.join(degrad_dir, fname)):
+            continue
+        if not fname.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
+            continue
+        base = os.path.basename(fname)
+        if exclude_basenames and (base in exclude_basenames or os.path.splitext(base)[0] in exclude_basenames):
+            continue
+        ref_path = os.path.join(ref_dir, fname)
+        if not os.path.isfile(ref_path):
+            continue
+        degrad_path = os.path.join(degrad_dir, fname)
+        pairs.append({"degrad_path": degrad_path, "ref_path": ref_path, "source_id": source_id})
+    return pairs
+
+
+def build_uie_mixed_pool_and_split(args, train_ratio=0.9, seed=None):
+    """Build mixed UIE pool (excluding UIEB test 90), split into train/val.
+    Returns:
+        train_samples: list of sample dicts for training
+        val_samples: list of sample dicts for validation
+        train_source_ids: list of source_id per train sample (for weighted sampler)
+    """
+    if seed is not None:
+        rng = random.Random(seed)
+    else:
+        rng = random
+
+    exclude = load_uieb_test_ids(args.uieb_test_list)
+    # 实际目录为 input/ 与 target/（与 data/Train/uie/ 一致）
+    uieb = _collect_pairs_from_dir(
+        args.uieb_dir, "input", "target", UIE_SOURCE_UIEB, exclude_basenames=exclude
+    )
+    lsui = _collect_pairs_from_dir(args.lsui_dir, "input", "target", UIE_SOURCE_LSUI)
+    euvp = _collect_pairs_from_dir(args.euvp_dir, "input", "target", UIE_SOURCE_EUVP)
+
+    if len(uieb) == 0 and os.path.isdir(args.uieb_dir):
+        uieb = _collect_pairs_from_dir(args.uieb_dir, "input", "ref", UIE_SOURCE_UIEB, exclude_basenames=exclude)
+    if len(lsui) == 0 and os.path.isdir(args.lsui_dir):
+        lsui = _collect_pairs_from_dir(args.lsui_dir, "input", "ref", UIE_SOURCE_LSUI)
+    if len(euvp) == 0 and os.path.isdir(args.euvp_dir):
+        euvp = _collect_pairs_from_dir(args.euvp_dir, "input", "ref", UIE_SOURCE_EUVP)
+
+    all_samples = uieb + lsui + euvp
+    if len(all_samples) == 0:
+        raise RuntimeError(
+            "UIE mixed pool is empty. Check uie_data_dir and that uieb/lsui/euvp each have input/ and target/ with matching filenames."
+        )
+    rng.shuffle(all_samples)
+
+    n = len(all_samples)
+    n_train = int(n * train_ratio)
+    if n_train < 1:
+        n_train = 1
+    train_samples = all_samples[:n_train]
+    val_samples = all_samples[n_train:]
+    train_source_ids = [s["source_id"] for s in train_samples]
+
+    return train_samples, val_samples, train_source_ids
+
+
+def build_uie_weighted_sampler(train_source_ids, num_samples=None, replacement=True):
+    """WeightedRandomSampler so that batch ratio is UIEB:LSUI:EUVP = 40:40:20."""
+    if num_samples is None:
+        num_samples = len(train_source_ids)
+    if num_samples == 0:
+        raise RuntimeError("Cannot build weighted sampler for empty train set.")
+    n_per_source = [0, 0, 0]
+    for sid in train_source_ids:
+        n_per_source[sid] += 1
+    # weight[i] = target_ratio[source_i] / n_source
+    target_ratios = list(UIE_SOURCE_RATIOS)
+    weights = []
+    for sid in train_source_ids:
+        r = target_ratios[sid]
+        n = max(n_per_source[sid], 1)
+        weights.append(r / n)
+    weights = torch.tensor(weights, dtype=torch.double)
+    return torch.utils.data.WeightedRandomSampler(
+        weights, num_samples=num_samples, replacement=replacement
+    )
+
+
+def get_uie_train_val_datasets_and_sampler(args, train_ratio=0.9):
+    """One-shot helper for Task 7: mixed UIE train/val datasets and weighted train sampler.
+    Returns:
+        train_dataset: UnderwaterDataset for training
+        val_dataset: UnderwaterDataset for validation (can be empty)
+        train_sampler: WeightedRandomSampler for train (use with DataLoader(..., sampler=train_sampler, shuffle=False)
+    """
+    train_samples, val_samples, train_source_ids = build_uie_mixed_pool_and_split(
+        args, train_ratio=train_ratio, seed=42
+    )
+    train_dataset = UnderwaterDataset(train_samples, args.patch_size)
+    val_dataset = UnderwaterDataset(val_samples, args.patch_size)
+    train_sampler = build_uie_weighted_sampler(
+        train_source_ids, num_samples=len(train_dataset), replacement=True
+    )
+    return train_dataset, val_dataset, train_sampler
+
     
 class AdaIRTrainDataset(Dataset):
     def __init__(self, args):

@@ -4,8 +4,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from utils.dataset_utils import AdaIRTrainDataset
+from utils.dataset_utils import AdaIRTrainDataset, get_uie_train_val_datasets_and_sampler
 from net.model import AdaIR
+from utils.checkpoint_utils import load_adair_ckpt_for_uie_finetune
 from utils.schedulers import LinearWarmupCosineAnnealingLR
 from utils.pytorch_ssim import ssim as pytorch_ssim
 import numpy as np
@@ -79,27 +80,58 @@ class AdaIRModel(pl.LightningModule):
 def main():
     print("Options")
     print(opt)
-    if opt.wblogger is not None:
+    if getattr(opt, "wblogger", None):
         logger = WandbLogger(
             project=opt.wblogger,
             name="AdaIR-Train",
             offline=opt.wandb_offline,
             save_dir="wandb",
         )
-        # 将全部命令行参数记入 wandb.config，便于在 wandb 网页查看与复现
-        logger.experiment.config.update(vars(opt), allow_val_change=True)
+        # 将全部命令行参数记入 wandb.config（部分环境里 config 为方法，需先取再 update）
+        _config = logger.experiment.config
+        if callable(_config):
+            _config = _config()
+        if hasattr(_config, "update"):
+            _config.update(vars(opt), allow_val_change=True)
         if opt.wandb_offline:
             print("wandb 离线模式：数据将保存在 ./wandb/ 下，联网后执行: wandb sync ./wandb/offline-run-* 可上传")
     else:
         logger = TensorBoardLogger(save_dir = "logs/")
 
-    trainset = AdaIRTrainDataset(opt)
-    checkpoint_callback = ModelCheckpoint(dirpath = opt.ckpt_dir,every_n_epochs = 1,save_top_k=-1)
-    trainloader = DataLoader(trainset, batch_size=opt.batch_size, pin_memory=True, shuffle=True,
-                             drop_last=True, num_workers=opt.num_workers)
-    
+    if getattr(opt, "train_uie_only", False):
+        train_dataset, val_dataset, train_sampler = get_uie_train_val_datasets_and_sampler(opt, train_ratio=0.9)
+        # 单卡用 WeightedRandomSampler(40:40:20)；多卡不传 sampler，由 Lightning 在 DDP 下自动加 DistributedSampler
+        use_sampler = getattr(opt, "num_gpus", 1) == 1
+        trainloader = DataLoader(
+            train_dataset,
+            batch_size=opt.batch_size,
+            sampler=train_sampler if use_sampler else None,
+            shuffle=False if use_sampler else True,
+            drop_last=True,
+            num_workers=opt.num_workers,
+            pin_memory=True,
+        )
+        val_loader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=False, num_workers=opt.num_workers) if len(val_dataset) > 0 else None
+    else:
+        trainset = AdaIRTrainDataset(opt)
+        trainloader = DataLoader(trainset, batch_size=opt.batch_size, pin_memory=True, shuffle=True,
+                                 drop_last=True, num_workers=opt.num_workers)
+        val_loader = None
+
+    checkpoint_callback = ModelCheckpoint(dirpath=opt.ckpt_dir, every_n_epochs=1, save_top_k=-1)
     model = AdaIRModel()
-    
+
+    if getattr(opt, "resume_ckpt", None):
+        info = load_adair_ckpt_for_uie_finetune(
+            model, opt.resume_ckpt,
+            old_num_tasks=5, new_num_tasks=8, copy_from_task_index=0,
+        )
+        print("Checkpoint loaded (5->8 task): expanded =", info.get("expanded", []), "missing =", len(info.get("missing", [])))
+
+    fit_kw = {"model": model, "train_dataloaders": trainloader}
+    if val_loader is not None:
+        fit_kw["val_dataloaders"] = val_loader
+
     trainer = pl.Trainer(
         max_epochs=opt.epochs,
         accelerator="gpu",
@@ -110,7 +142,7 @@ def main():
         precision=opt.precision,
         accumulate_grad_batches=opt.accumulate_grad_batches,
     )
-    trainer.fit(model=model, train_dataloaders=trainloader)
+    trainer.fit(**fit_kw)
 
 
 if __name__ == '__main__':
