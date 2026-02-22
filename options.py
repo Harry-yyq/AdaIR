@@ -2,39 +2,44 @@ import argparse
 
 parser = argparse.ArgumentParser()
 
-# Input Parameters
-parser.add_argument('--cuda', type=int, default=0)
+# 训练主参数
+parser.add_argument("--epochs", type=int, default=150, help="训练轮数")
+parser.add_argument("--batch_size", type=int, default=8, help="每 GPU batch size")
+parser.add_argument("--patch_size", type=int, default=128, help="训练 patch 边长")
+parser.add_argument("--num_workers", type=int, default=16, help="DataLoader workers")
+parser.add_argument("--num_gpus", type=int, default=8, help="使用的 GPU 数")
+parser.add_argument("--precision", type=str, default="16-mixed", choices=["32", "16-mixed", "bf16-mixed"], help="混合精度")
+parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="梯度累积步数")
 
-parser.add_argument('--epochs', type=int, default=150, help='maximum number of epochs to train the total model.')
-parser.add_argument('--batch_size', type=int,default=8,help="Batch size to use per GPU")
-parser.add_argument('--lr', type=float, default=2e-4, help='learning rate of encoder.')
+# 数据路径（常规多任务）
+parser.add_argument("--data_file_dir", type=str, default="data_dir/")
+parser.add_argument("--denoise_dir", type=str, default="data/Train/Denoise/")
+parser.add_argument("--gopro_dir", type=str, default="data/Train/Deblur/")
+parser.add_argument("--enhance_dir", type=str, default="data/Train/Enhance/")
+parser.add_argument("--derain_dir", type=str, default="data/Train/Derain/")
+parser.add_argument("--dehaze_dir", type=str, default="data/Train/Dehaze/")
+parser.add_argument("--de_type", nargs="+", default=["denoise_15", "denoise_25", "denoise_50", "derain", "dehaze", "deblur", "enhance"])
 
-parser.add_argument('--de_type', nargs='+', default=['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance'],
-                    help='which type of degradations is training and testing for.')
+# 输出与日志
+parser.add_argument("--ckpt_dir", type=str, default="AdaIR", help="checkpoint 保存目录")
+parser.add_argument("--wblogger", type=str, default="AdaIR", help="wandb 项目名，空则不用 wandb")
+parser.add_argument("--wandb_offline", action="store_true", help="wandb 离线先存本地")
 
-parser.add_argument('--patch_size', type=int, default=128, help='patchsize of input.')
-parser.add_argument('--num_workers', type=int, default=16, help='number of workers.')
+# Task 7 水下增强：根目录 data/Train/uie/，下含 uieb/ lsui/ euvp/（各带 input/、target/），可选 test_list.txt
+parser.add_argument("--uie_data_dir", type=str, default="data/Train/uie/", help="UIE 数据根目录（下含 uieb/lsui/euvp，各含 input/ 与 target/）")
+parser.add_argument("--train_uie_only", action="store_true", help="仅用 Task 7 混合数据训练")
 
-# path
-parser.add_argument('--data_file_dir', type=str, default='data_dir/',  help='where clean images of denoising saves.')
-parser.add_argument('--denoise_dir', type=str, default='data/Train/Denoise/',
-                    help='where clean images of denoising saves.')
-parser.add_argument('--gopro_dir', type=str, default='data/Train/Deblur/',
-                    help='where clean images of denoising saves.')
-parser.add_argument('--enhance_dir', type=str, default='data/Train/Enhance/',
-                    help='where clean images of denoising saves.')
-parser.add_argument('--derain_dir', type=str, default='data/Train/Derain/',
-                    help='where training images of deraining saves.')
-parser.add_argument('--dehaze_dir', type=str, default='data/Train/Dehaze/',
-                    help='where training images of dehazing saves.')
-parser.add_argument('--output_path', type=str, default="output/", help='output save path')
-parser.add_argument('--ckpt_path', type=str, default="ckpt/Denoise/", help='checkpoint save path')
-parser.add_argument("--wblogger", type=str, default="AdaIR", help="Determine to log to wandb or not and the project name")
-parser.add_argument("--wandb_offline", action="store_true", help="wandb 离线模式：先存本地，联网后可用 wandb sync 上传")
-parser.add_argument("--ckpt_dir",type=str,default="AdaIR",help = "Name of the Directory where the checkpoint is to be saved")
-parser.add_argument("--num_gpus", type=int, default=8, help="Number of GPUs to use for training")
-parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Gradient accumulation steps (effective batch = batch_size * accumulate_grad_batches * num_gpus)")
-parser.add_argument("--precision", type=str, default="16-mixed", choices=["32", "16-mixed", "bf16-mixed"], help="Training precision; 16-mixed reduces GPU memory")
+# 预训练加载（扩展 5->8 task 时用默认即可）
+parser.add_argument("--resume_ckpt", type=str, default=None, help="预训练 .ckpt 路径，加载时默认 5->8 task")
 
 options = parser.parse_args()
+
+# 由 uie_data_dir 派生的路径（与 data/Train/uie/ 实际目录一致：小写 uieb/lsui/euvp）
+def _uie_paths():
+    base = options.uie_data_dir.rstrip("/") + "/"
+    options.uieb_dir = base + "uieb/"
+    options.lsui_dir = base + "lsui/"
+    options.euvp_dir = base + "euvp/"
+    options.uieb_test_list = base + "test_list.txt"  # 可选：列出 90 张 UIEB 测试图文件名，训练时从 UIEB 中排除
+_uie_paths()
 

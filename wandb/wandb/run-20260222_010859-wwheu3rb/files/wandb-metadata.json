@@ -1,0 +1,22 @@
+{
+  "os":  "Linux-5.4.0-100-generic-x86_64-with-glibc2.17",
+  "python":  "CPython 3.8.20",
+  "startedAt":  "2026-02-21T17:08:59.893405Z",
+  "args":  [
+    "--train_uie_only",
+    "--resume_ckpt",
+    "ckpt/adair5d.ckpt"
+  ],
+  "program":  "train.py",
+  "codePath":  "train.py",
+  "codePathLocal":  "train.py",
+  "git":  {
+    "remote":  "https://github.com/Harry-yyq/AdaIR.git",
+    "commit":  "420c469516099aac7cdc6947726f9f0f5bd26cb9"
+  },
+  "email":  "yiqiangyaoharry@gmail.com",
+  "root":  "wandb",
+  "host":  "node45",
+  "executable":  "/root/anaconda3/envs/AdaIR/bin/python",
+  "writerId":  "jzcpw1zvyqu5yw4k6kdmxkfzpf5gphk9"
+}
