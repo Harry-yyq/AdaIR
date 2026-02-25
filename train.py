@@ -60,10 +60,14 @@ class AdaIRModel(pl.LightningModule):
         return loss
 
     def on_train_epoch_end(self):
-        # 每个 epoch 结束记录本 epoch 平均 loss / PSNR / SSIM
+        # 每个 epoch 结束记录本 epoch 平均 loss / PSNR / SSIM（含下划线 key 供 best_ckpt 文件名格式化）
+        psnr_val = self._epoch_psnr.compute()
+        ssim_val = self._epoch_ssim.compute()
         self.log("epoch/train_loss", self._epoch_loss.compute())
-        self.log("epoch/train_psnr", self._epoch_psnr.compute())
-        self.log("epoch/train_ssim", self._epoch_ssim.compute())
+        self.log("epoch/train_psnr", psnr_val)
+        self.log("epoch/train_ssim", ssim_val)
+        self.log("epoch_train_psnr", psnr_val)
+        self.log("epoch_train_ssim", ssim_val)
         self._epoch_loss.reset()
         self._epoch_psnr.reset()
         self._epoch_ssim.reset()
@@ -131,12 +135,27 @@ def main():
                                  drop_last=True, num_workers=opt.num_workers)
         val_loader = None
 
-    checkpoint_callback = ModelCheckpoint(dirpath=opt.ckpt_dir, every_n_epochs=1, save_top_k=-1)
-    # 单独保存效果最好的 1 个 ckpt（按 epoch 平均 PSNR 最高）
-    best_ckpt_callback = ModelCheckpoint(
+    # 1) 每个 epoch 正常保存到 ckpt_dir
+    epoch_ckpt_callback = ModelCheckpoint(
         dirpath=opt.ckpt_dir,
-        filename="best-{epoch:03d}-psnr={epoch/train_psnr:.4f}",
-        monitor="epoch/train_psnr",
+        filename="epoch={epoch:03d}-step={step}",
+        every_n_epochs=1,
+        save_top_k=-1,
+    )
+    # 2) 效果最好的 ckpt 保存到 ckpt_dir/best_ckpt，分别按 PSNR 和 SSIM 各保留 1 个，不新建文件夹
+    best_ckpt_dir = os.path.join(opt.ckpt_dir, "best_ckpt")
+    best_psnr_callback = ModelCheckpoint(
+        dirpath=best_ckpt_dir,
+        filename="best_psnr-step={step}-epoch={epoch:03d}-psnr={epoch_train_psnr:.2f}-ssim={epoch_train_ssim:.4f}",
+        monitor="epoch_train_psnr",
+        mode="max",
+        save_top_k=1,
+        save_last=False,
+    )
+    best_ssim_callback = ModelCheckpoint(
+        dirpath=best_ckpt_dir,
+        filename="best_ssim-step={step}-epoch={epoch:03d}-psnr={epoch_train_psnr:.2f}-ssim={epoch_train_ssim:.4f}",
+        monitor="epoch_train_ssim",
         mode="max",
         save_top_k=1,
         save_last=False,
@@ -160,7 +179,7 @@ def main():
         devices=opt.num_gpus,
         strategy="ddp_find_unused_parameters_true",
         logger=logger,
-        callbacks=[checkpoint_callback, best_ckpt_callback],
+        callbacks=[epoch_ckpt_callback, best_psnr_callback, best_ssim_callback],
         precision=opt.precision,
         accumulate_grad_batches=opt.accumulate_grad_batches,
         gradient_clip_val=opt.grad_clip if getattr(opt, "grad_clip", 0.5) > 0 else None,
