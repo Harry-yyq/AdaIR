@@ -12,6 +12,11 @@ parser.add_argument("--num_workers", type=int, default=16, help="DataLoader work
 parser.add_argument("--num_gpus", type=int, default=8, help="使用的 GPU 数")
 parser.add_argument("--precision", type=str, default="16-mixed", choices=["32", "16-mixed", "bf16-mixed"], help="混合精度")
 parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="梯度累积步数")
+parser.add_argument("--pixel_loss_type", type=str, default="l1", choices=["l1", "charbonnier"],
+                    help="像素级损失类型：l1 或 charbonnier")
+parser.add_argument("--loss_w_l1", type=float, default=1.0, help="像素损失（L1/Charbonnier）权重")
+parser.add_argument("--loss_w_cosine", type=float, default=0.5, help="Cosine loss 权重")
+parser.add_argument("--loss_w_perceptual", type=float, default=0.01, help="Perceptual loss 权重，0 表示不使用")
 
 # 数据路径（常规多任务）
 parser.add_argument("--data_file_dir", type=str, default="data_dir/")

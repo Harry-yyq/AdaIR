@@ -1,0 +1,222 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    python_version: 3.8.20
+    cli_version: 0.24.1
+    framework: torch
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1771778390
+    t:
+      1:
+      - 1
+      - 41
+      - 106
+      2:
+      - 1
+      - 41
+      - 106
+      3:
+      - 4
+      - 7
+      - 13
+      - 42
+      - 66
+      4: 3.8.20
+      5: 0.24.1
+      13: linux-x86_64
+    e:
+      xc3dlahfbrpztck9wkuz5sewt6y6f3s1:
+        os: Linux-5.4.0-100-generic-x86_64-with-glibc2.17
+        python: CPython 3.8.20
+        started_at: '2026-02-22T16:39:50.266729Z'
+        args:
+        - --train_uie_only
+        - --resume_ckpt
+        - ckpt/adair5d.ckpt
+        - --wandb_offline
+        - --epochs
+        - '250'
+        - --lr
+        - 1e-5
+        program: train.py
+        code_path: train.py
+        code_path_local: train.py
+        git:
+          remote_url: https://github.com/Harry-yyq/AdaIR.git
+          commit: 4a98b8813a8a8c5518bf5ae238abd8080cecf44b
+        root: wandb
+        host: node45
+        executable: /root/anaconda3/envs/AdaIR/bin/python
+        cpu_count: 80
+        cpu_count_logical: 160
+        gpu_type: NVIDIA A800-SXM4-80GB
+        gpu_count: 8
+        disk:
+          /:
+            total: '1885942272000'
+            used: '1717085663232'
+        memory:
+          total: '540656128000'
+        gpu_nvidia:
+        - name: NVIDIA A800-SXM4-80GB
+          memory_total: '85899345920'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-a2155521-e896-2a81-079f-5f69a859b7c3
+        - name: NVIDIA A800-SXM4-80GB
+          memory_total: '85899345920'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-1ca50c5a-7917-8570-d862-1cdcdced46ab
+        - name: NVIDIA A800-SXM4-80GB
+          memory_total: '85899345920'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-7fcbe515-6f25-6c65-d56b-ba67a66dcdd7
+        - name: NVIDIA A800-SXM4-80GB
+          memory_total: '85899345920'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-6ce176f0-256e-8d3c-b9b5-15cb3c8ac010
+        - name: NVIDIA A800-SXM4-80GB
+          memory_total: '85899345920'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-de40636d-124b-050c-bac0-2133e7a6c7fa
+        - name: NVIDIA A800-SXM4-80GB
+          memory_total: '85899345920'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-3098ad04-5aad-42f2-6ad8-656dec8e310e
+        - name: NVIDIA A800-SXM4-80GB
+          memory_total: '85899345920'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-6370d9c2-f812-a5a8-fc53-b4c474a71724
+        - name: NVIDIA A800-SXM4-80GB
+          memory_total: '85899345920'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-f5dfcaf3-4868-ab3c-a078-ecdf6f3e2c9d
+        cuda_version: '12.1'
+        writer_id: xc3dlahfbrpztck9wkuz5sewt6y6f3s1
+    m:
+    - 1: trainer/global_step
+      6:
+      - 3
+    - 1: step/train_loss
+      5: 1
+      6:
+      - 1
+    - 1: step/train_psnr
+      5: 1
+      6:
+      - 1
+    - 1: step/train_ssim
+      5: 1
+      6:
+      - 1
+    - 1: epoch
+      5: 1
+      6:
+      - 1
+    - 1: epoch/train_psnr
+      5: 1
+      6:
+      - 1
+    - 1: epoch/train_ssim
+      5: 1
+      6:
+      - 1
+    - 1: epoch/train_loss
+      5: 1
+      6:
+      - 1
+epochs:
+  desc: null
+  value: 250
+batch_size:
+  desc: null
+  value: 8
+lr:
+  desc: null
+  value: 1.0e-05
+grad_clip:
+  desc: null
+  value: 0.5
+patch_size:
+  desc: null
+  value: 128
+num_workers:
+  desc: null
+  value: 16
+num_gpus:
+  desc: null
+  value: 8
+precision:
+  desc: null
+  value: 16-mixed
+accumulate_grad_batches:
+  desc: null
+  value: 1
+data_file_dir:
+  desc: null
+  value: data_dir/
+denoise_dir:
+  desc: null
+  value: data/Train/Denoise/
+gopro_dir:
+  desc: null
+  value: data/Train/Deblur/
+enhance_dir:
+  desc: null
+  value: data/Train/Enhance/
+derain_dir:
+  desc: null
+  value: data/Train/Derain/
+dehaze_dir:
+  desc: null
+  value: data/Train/Dehaze/
+de_type:
+  desc: null
+  value:
+  - denoise_15
+  - denoise_25
+  - denoise_50
+  - derain
+  - dehaze
+  - deblur
+  - enhance
+ckpt_dir:
+  desc: null
+  value: AdaIR
+wblogger:
+  desc: null
+  value: AdaIR
+wandb_offline:
+  desc: null
+  value: true
+uie_data_dir:
+  desc: null
+  value: data/Train/uie/
+train_uie_only:
+  desc: null
+  value: true
+resume_ckpt:
+  desc: null
+  value: ckpt/adair5d.ckpt
+uieb_dir:
+  desc: null
+  value: data/Train/uie/uieb/
+lsui_dir:
+  desc: null
+  value: data/Train/uie/lsui/
+euvp_dir:
+  desc: null
+  value: data/Train/uie/euvp/
+uieb_test_list:
+  desc: null
+  value: data/Train/uie/test_list.txt
