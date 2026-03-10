@@ -60,7 +60,8 @@ def test_UIE(net, dataset, dataset_name="UIE"):
             [name], degrad, clean = dataset[i]
             degrad = degrad.cuda()
             clean = clean.cuda()
-            restored = net(degrad)
+            out = net(degrad)
+            restored = out[0] if isinstance(out, (tuple, list)) else out
             restored = torch.clamp(restored, 0, 1)
             temp_psnr, temp_ssim, N = compute_psnr_ssim(restored, clean)
             psnr.update(temp_psnr, N)

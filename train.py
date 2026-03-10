@@ -17,6 +17,7 @@ import lightning.pytorch as pl
 from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torchmetrics import MeanMetric
+from torchvision.utils import make_grid
 
 
 class AdaIRModel(pl.LightningModule):
@@ -31,17 +32,44 @@ class AdaIRModel(pl.LightningModule):
         self._epoch_ssim = MeanMetric(sync_on_compute=True)
 
     def forward(self, x):
-        return self.net(x)
+        I_restored, I_low_res, _ = self.net(x)
+        return I_restored, I_low_res
 
     def training_step(self, batch, batch_idx):
         ([clean_name, de_id], degrad_patch, clean_patch) = batch
-        restored = self.net(degrad_patch)
+        I_restored, I_low_res, latent = self.net(degrad_patch)
 
-        loss = self.loss_fn(restored, clean_patch)
+        # ---------- 非对称监督：辅助色彩 Loss + 最终结构 Loss ----------
+        # GT 下采样到与 I_low_res 相同分辨率，与 Encoder 辅助输出对齐
+        GT_low_res = F.interpolate(
+            clean_patch,
+            size=(I_low_res.size(-2), I_low_res.size(-1)),
+            mode="bilinear",
+            align_corners=False,
+        )
+        # 辅助色彩 Loss：L1 + Cosine Similarity Loss
+        loss_color_l1 = self.loss_fn(I_low_res, GT_low_res)
+        B = I_low_res.size(0)
+        I_flat = I_low_res.view(B, -1)
+        GT_flat = GT_low_res.view(B, -1)
+        cos_sim = F.cosine_similarity(I_flat, GT_flat, dim=1)
+        loss_color_cos = (1 - cos_sim).mean()
+        loss_color = loss_color_l1 + loss_color_cos
+        # 最终结构 Loss：原分辨率 L1
+        loss_spatial = self.loss_fn(I_restored, clean_patch)
+        loss = loss_spatial + 0.2 * loss_color
+
+        # ---------- Instruction 多样性监控：Bottleneck 潜变量方差，趋近 0 表示模式崩溃 ----------
+        # 使用 unbiased=False 避免 B=1 时 std 返回 NaN
+        with torch.no_grad():
+            instruction_std = latent.reshape(B, -1).std(dim=1, unbiased=False).mean().item()
+        self.log("step/instruction_std", instruction_std, on_step=True, on_epoch=False)
+        self.log("step/loss_spatial", loss_spatial, on_step=True, on_epoch=False)
+        self.log("step/loss_color", loss_color, on_step=True, on_epoch=False)
 
         # 每个 step 的 PSNR、SSIM（不参与反传，仅用于监控）
         with torch.no_grad():
-            restored_d = restored.detach().clamp(0, 1)
+            restored_d = I_restored.detach().clamp(0, 1)
             clean_d = clean_patch.detach().clamp(0, 1)
             mse = F.mse_loss(restored_d, clean_d).clamp(min=1e-10)
             step_psnr = (10 * torch.log10(1.0 / mse)).float()
@@ -51,6 +79,26 @@ class AdaIRModel(pl.LightningModule):
         self.log("step/train_loss", loss, on_step=True, on_epoch=False)
         self.log("step/train_psnr", step_psnr, on_step=True, on_epoch=False)
         self.log("step/train_ssim", step_ssim, on_step=True, on_epoch=False)
+
+        # ---------- 每隔 N 步保存 I_low_res / GT_low_res 网格图到 Wandb（仅 rank0 避免 DDP 重复） ----------
+        if (
+            getattr(opt, "wblogger", None)
+            and (self.global_step + 1) % 500 == 0
+            and batch_idx == 0
+            and getattr(self.trainer, "global_rank", 0) == 0
+        ):
+            with torch.no_grad():
+                grid_pred = make_grid(I_low_res.detach().clamp(0, 1), nrow=4, padding=2)
+                grid_gt = make_grid(GT_low_res.detach().clamp(0, 1), nrow=4, padding=2)
+            logger = self.logger
+            if hasattr(logger, "experiment") and hasattr(logger.experiment, "log"):
+                logger.experiment.log(
+                    {
+                        "train/I_low_res": wandb.Image(grid_pred.permute(1, 2, 0).cpu().numpy()),
+                        "train/GT_low_res": wandb.Image(grid_gt.permute(1, 2, 0).cpu().numpy()),
+                    },
+                    step=self.global_step,
+                )
 
         # 累积用于 epoch 均值
         self._epoch_loss.update(loss)
@@ -71,7 +119,37 @@ class AdaIRModel(pl.LightningModule):
         self._epoch_loss.reset()
         self._epoch_psnr.reset()
         self._epoch_ssim.reset()
-    
+
+    def validation_step(self, batch, batch_idx):
+        """Validation 时记录 I_low_res / GT_low_res 网格图，便于肉眼确认 Encoder 修色效果。"""
+        ([clean_name, de_id], degrad_patch, clean_patch) = batch
+        I_restored, I_low_res, _ = self.net(degrad_patch)
+        GT_low_res = F.interpolate(
+            clean_patch,
+            size=(I_low_res.size(-2), I_low_res.size(-1)),
+            mode="bilinear",
+            align_corners=False,
+        )
+        # 仅 rank0、第一个 batch 上传图像，避免 DDP 重复与日志过大
+        if (
+            batch_idx == 0
+            and getattr(opt, "wblogger", None)
+            and getattr(self.trainer, "global_rank", 0) == 0
+        ):
+            with torch.no_grad():
+                grid_pred = make_grid(I_low_res.detach().clamp(0, 1), nrow=4, padding=2)
+                grid_gt = make_grid(GT_low_res.detach().clamp(0, 1), nrow=4, padding=2)
+            logger = self.logger
+            if hasattr(logger, "experiment") and hasattr(logger.experiment, "log"):
+                logger.experiment.log(
+                    {
+                        "val/I_low_res": wandb.Image(grid_pred.permute(1, 2, 0).cpu().numpy()),
+                        "val/GT_low_res": wandb.Image(grid_gt.permute(1, 2, 0).cpu().numpy()),
+                    },
+                    step=self.global_step,
+                )
+        return None
+
     def lr_scheduler_step(self,scheduler,metric):
         scheduler.step(self.current_epoch)
         lr = scheduler.get_lr()
@@ -87,19 +165,22 @@ def main():
     print("Options")
     print(opt)
     if getattr(opt, "wblogger", None):
+        # 项目名中 = 会与 wandb 冲突，统一换成 _
+        project = str(opt.wblogger).replace("=", "_")
+        # 默认离线，避免内网/代理下 wandb.init() 一直重试卡住；需实时上传时加 --wandb_online
+        use_offline = not getattr(opt, "wandb_online", False)
         logger = WandbLogger(
-            project=opt.wblogger,
+            project=project,
             name="AdaIR-Train",
-            offline=opt.wandb_offline,
+            offline=use_offline,
             save_dir="wandb",
         )
-        # 将全部命令行参数记入 wandb.config（部分环境里 config 为方法，需先取再 update）
         _config = logger.experiment.config
         if callable(_config):
             _config = _config()
         if hasattr(_config, "update"):
             _config.update(vars(opt), allow_val_change=True)
-        if opt.wandb_offline:
+        if use_offline:
             print("wandb 离线模式：数据将保存在 ./wandb/ 下，联网后执行: wandb sync ./wandb/offline-run-* 可上传")
     else:
         logger = TensorBoardLogger(save_dir = "logs/")

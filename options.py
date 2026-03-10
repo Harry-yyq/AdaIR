@@ -30,7 +30,8 @@ parser.add_argument("--de_type", nargs="+", default=["denoise_15", "denoise_25",
 # 输出与日志
 parser.add_argument("--ckpt_dir", type=str, default="AdaIR", help="checkpoint 保存目录")
 parser.add_argument("--wblogger", type=str, default="AdaIR", help="wandb 项目名，空则不用 wandb")
-parser.add_argument("--wandb_offline", action="store_true", help="wandb 离线先存本地")
+parser.add_argument("--wandb_offline", action="store_true", help="wandb 离线先存本地（默认已离线，避免内网/代理卡住）")
+parser.add_argument("--wandb_online", action="store_true", help="尝试 wandb 在线上传（内网/代理下可能卡住）")
 
 # Task 7 水下增强：根目录 data/Train/uie/，下含 uieb/ lsui/ euvp/（各带 input/、target/），可选 test_list.txt
 parser.add_argument("--uie_data_dir", type=str, default="data/Train/uie/", help="UIE 数据根目录（下含 uieb/lsui/euvp，各含 input/ 与 target/）")

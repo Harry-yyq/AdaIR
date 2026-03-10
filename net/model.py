@@ -367,6 +367,55 @@ class FreModule(nn.Module):
 
 
 ##########################################################################
+## 频域色彩提亮模块 (FFT-based Color Block) — DarkIR 风格：仅修振幅、相位不变
+## 插入 Encoder 最深层（Bottleneck），用于水下等场景的全局亮度/色彩校正
+class FrequencyColorEnhanceBlock(nn.Module):
+    """在频域内仅对振幅进行缩放与特征变换，相位绝对保持不变，再逆变换回空域。"""
+
+    def __init__(self, dim, use_instruction=False, instruction_dim=None):
+        super().__init__()
+        self.dim = dim
+        self.use_instruction = use_instruction
+        # 仅对振幅做缩放的小型卷积网络（代表亮度和全局色彩调整）
+        self.amp_net = nn.Sequential(
+            nn.Conv2d(dim, max(dim // 4, 1), kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(max(dim // 4, 1), dim, kernel_size=1),
+            nn.Sigmoid(),
+        )
+        # 缩放因子范围 [0.5, 1.5]，避免振幅爆炸
+        self.amp_scale_bias = 0.5
+        self.amp_scale_range = 1.0
+
+    def forward(self, x, instruction=None):
+        """
+        x: (B, C, H, W) 编码器 Bottleneck 特征
+        instruction: 可选，与 AdaIR Instruction 结合时传入
+        """
+        # ---------- 防 NaN：AMP 混合精度下 FFT/IFFT 强制 float32 ----------
+        orig_dtype = x.dtype
+        x = x.float()
+
+        # 实部 FFT，输出形状 (B, C, H, W//2+1) 复数
+        fft = torch.fft.rfft2(x, norm="ortho")
+        # 振幅与相位解耦
+        amplitude = torch.abs(fft)
+        phase = torch.angle(fft)
+        # 防止振幅为 0 时梯度异常，做数值稳定
+        amplitude = amplitude.clamp(min=1e-8)
+
+        # 仅修振幅：小型网络输出 [0,1]，映射到缩放因子
+        scale = self.amp_net(amplitude) * self.amp_scale_range + self.amp_scale_bias
+        amplitude_new = amplitude * scale
+
+        # 绝对保护相位：用新振幅 + 原相位重构复数
+        fft_new = amplitude_new * torch.exp(1j * phase)
+        out = torch.fft.irfft2(fft_new, s=(x.size(-2), x.size(-1)), norm="ortho")
+
+        return out.to(orig_dtype)
+
+
+##########################################################################
 ##---------- AdaIR -----------------------
 
 class AdaIR(nn.Module):
@@ -405,7 +454,10 @@ class AdaIR(nn.Module):
 
         self.down3_4 = Downsample(int(dim*2**2)) ## From Level 3 to Level 4
         self.latent = nn.Sequential(*[TransformerBlock(dim=int(dim*2**3), num_heads=heads[3], ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[3])])
-        
+        # Encoder 最深层：频域色彩提亮 + 辅助色彩输出（DarkIR 解耦：频域修色）
+        self.freq_color_block = FrequencyColorEnhanceBlock(int(dim*2**3))
+        self.color_head = nn.Conv2d(int(dim*2**3), 3, kernel_size=1, bias=bias)
+
         self.up4_3 = Upsample(int(dim*2**3)) ## From Level 4 to Level 3
         self.reduce_chan_level3 = nn.Conv2d(int(dim*2**3), int(dim*2**2), kernel_size=1, bias=bias)
 
@@ -437,8 +489,13 @@ class AdaIR(nn.Module):
 
         out_enc_level3 = self.encoder_level3(inp_enc_level3) 
 
-        inp_enc_level4 = self.down3_4(out_enc_level3)        
-        latent = self.latent(inp_enc_level4) 
+        inp_enc_level4 = self.down3_4(out_enc_level3)
+        latent = self.latent(inp_enc_level4)
+        # 频域色彩提亮（仅改振幅、相位不变）
+        latent = self.freq_color_block(latent)
+        # 辅助色彩输出：低分辨率 RGB，用于非对称监督 loss_color
+        I_low_res = self.color_head(latent)
+        I_low_res = torch.sigmoid(I_low_res)
 
         if self.decoder:
             latent = self.fre1(inp_img, latent)
@@ -470,6 +527,8 @@ class AdaIR(nn.Module):
         out_dec_level1 = self.refinement(out_dec_level1)
 
         out_dec_level1 = self.output(out_dec_level1) + inp_img
+        I_restored = out_dec_level1
 
-        return out_dec_level1
+        # latent 用于训练时记录 instruction_std，防止模式崩溃
+        return I_restored, I_low_res, latent
     

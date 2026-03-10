@@ -1,0 +1,179 @@
+_wandb:
+    value:
+        cli_version: 0.24.1
+        e:
+            fkxaatu9pk97hdtxtjkelasph19tz120:
+                args:
+                    - --train_uie_only
+                    - --wblogger
+                    - AdaIR=0310
+                    - --epochs
+                    - "300"
+                    - --lr
+                    - "2e-4"
+                    - --num_gpus
+                    - "8"
+                    - --ckpt_dir
+                    - AdaIR
+                codePath: train.py
+                codePathLocal: train.py
+                cpu_count: 80
+                cpu_count_logical: 160
+                cudaVersion: "12.1"
+                disk:
+                    /:
+                        total: "1885942272000"
+                        used: "1600501227520"
+                email: yiqiangyaoharry@gmail.com
+                executable: /root/anaconda3/envs/AdaIR/bin/python
+                git:
+                    commit: 6a475c7236cfe723175cec51af0be2a590933d2a
+                    remote: https://github.com/Harry-yyq/AdaIR.git
+                gpu: NVIDIA A800-SXM4-80GB
+                gpu_count: 8
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-a2155521-e896-2a81-079f-5f69a859b7c3
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-1ca50c5a-7917-8570-d862-1cdcdced46ab
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-7fcbe515-6f25-6c65-d56b-ba67a66dcdd7
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-6ce176f0-256e-8d3c-b9b5-15cb3c8ac010
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-de40636d-124b-050c-bac0-2133e7a6c7fa
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-3098ad04-5aad-42f2-6ad8-656dec8e310e
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-6370d9c2-f812-a5a8-fc53-b4c474a71724
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-f5dfcaf3-4868-ab3c-a078-ecdf6f3e2c9d
+                host: node45
+                memory:
+                    total: "540656128000"
+                os: Linux-5.4.0-100-generic-x86_64-with-glibc2.17
+                program: train.py
+                python: CPython 3.8.20
+                root: wandb
+                startedAt: "2026-03-10T03:32:03.095172Z"
+                writerId: fkxaatu9pk97hdtxtjkelasph19tz120
+        m:
+            - "1": trainer/global_step
+              "6":
+                - 3
+              "7": []
+            - "2": '*'
+              "5": 1
+              "6":
+                - 1
+              "7": []
+        python_version: 3.8.20
+        t:
+            "1":
+                - 1
+                - 41
+                - 106
+            "2":
+                - 1
+                - 41
+                - 106
+            "3":
+                - 7
+                - 13
+                - 61
+                - 66
+            "4": 3.8.20
+            "5": 0.24.1
+            "12": 0.24.1
+            "13": linux-x86_64
+accumulate_grad_batches:
+    value: 1
+batch_size:
+    value: 8
+ckpt_dir:
+    value: AdaIR
+data_file_dir:
+    value: data_dir/
+de_type:
+    value:
+        - denoise_15
+        - denoise_25
+        - denoise_50
+        - derain
+        - dehaze
+        - deblur
+        - enhance
+dehaze_dir:
+    value: data/Train/Dehaze/
+denoise_dir:
+    value: data/Train/Denoise/
+derain_dir:
+    value: data/Train/Derain/
+enhance_dir:
+    value: data/Train/Enhance/
+epochs:
+    value: 300
+euvp_dir:
+    value: data/Train/uie/euvp/
+gopro_dir:
+    value: data/Train/Deblur/
+grad_clip:
+    value: 0.5
+loss_w_cosine:
+    value: 0.5
+loss_w_l1:
+    value: 1
+loss_w_perceptual:
+    value: 0.01
+lr:
+    value: 0.0002
+lsui_dir:
+    value: data/Train/uie/lsui/
+num_gpus:
+    value: 8
+num_workers:
+    value: 16
+patch_size:
+    value: 128
+pixel_loss_type:
+    value: l1
+precision:
+    value: 16-mixed
+resume_ckpt:
+    value: null
+train_uie_only:
+    value: true
+uie_data_dir:
+    value: data/Train/uie/
+uieb_dir:
+    value: data/Train/uie/uieb/
+uieb_test_list:
+    value: data/Train/uie/test_list.txt
+wandb_offline:
+    value: false
+wblogger:
+    value: AdaIR=0310
