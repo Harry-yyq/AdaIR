@@ -264,6 +264,40 @@ class ChannelGate(nn.Module):
         scale = F.sigmoid(scale)
         return scale
 
+
+##########################################################################
+## 深度自适应校准模块 (DAL)：缓解空气-水下域鸿沟，零初始化保证初始恒等
+class DepthAdaptationLayer(nn.Module):
+    """
+    对单通道深度图做轻量级校准，输出与输入同尺寸，值域 [0, 1]。
+    最后一层零初始化，初始时 output = depth_map（恒等），便于微调/预训练兼容。
+    """
+    def __init__(self, channels=16):
+        super(DepthAdaptationLayer, self).__init__()
+        self.conv1 = nn.Conv2d(1, channels, kernel_size=3, stride=1, padding=1)
+        self.act1 = nn.LeakyReLU(0.2, inplace=True)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.act2 = nn.LeakyReLU(0.2, inplace=True)
+        self.conv3 = nn.Conv2d(channels, 1, kernel_size=3, stride=1, padding=1)
+        self._zero_init_last_conv()
+
+    def _zero_init_last_conv(self):
+        """最后一层卷积零初始化，使初始 forward 为恒等（残差为 0）。"""
+        nn.init.constant_(self.conv3.weight, 0.0)
+        nn.init.constant_(self.conv3.bias, 0.0)
+
+    def forward(self, depth):
+        """
+        Args:
+            depth: (B, 1, H, W)，原始深度图，值域建议 [0, 1]
+        Returns:
+            (B, 1, H, W)，校准后深度，clamp 到 [0, 1]
+        """
+        residual = self.conv3(self.act2(self.conv2(self.act1(self.conv1(depth)))))
+        out = depth + residual
+        return torch.clamp(out, 0.0, 1.0)
+
+
 ##########################################################################
 ## UG-AdaIR: 深度引导空间特征变换 (SFT)，Zero-Conv 初始化保证初始恒等
 DEBUG_MODE = True
@@ -442,6 +476,9 @@ class AdaIR(nn.Module):
 
         super(AdaIR, self).__init__()
 
+        # 深度自适应校准模块 (DAL)：校准深度图以缓解空气-水下域鸿沟
+        self.dal = DepthAdaptationLayer(channels=16)
+
         self.patch_embed = OverlapPatchEmbed(inp_channels, dim)        
         self.decoder = decoder
         
@@ -481,7 +518,18 @@ class AdaIR(nn.Module):
         self.output = nn.Conv2d(int(dim*2**1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
     def forward(self, inp_img, depth_map=None, noise_emb=None):
+        # 若传入深度图，先经 DAL 校准，后续所有 FreModule 均使用校准后的 depth_map（保持可导，无 detach）
+        if depth_map is not None:
+            depth_map = self.dal(depth_map)
+
         if DEBUG_MODE and depth_map is not None:
+            # 防御性检查：形状 [B, 1, H, W]、值域 [0, 1]，确保与 FreModule/SFT 兼容
+            assert depth_map.dim() == 4 and depth_map.size(1) == 1, (
+                "depth_map 应为 [B, 1, H, W]，当前 shape={}".format(tuple(depth_map.shape))
+            )
+            assert depth_map.dtype in (torch.float32, torch.float16), (
+                "depth_map dtype 应为 float32 或 float16，当前 {}".format(depth_map.dtype)
+            )
             d_min = float(depth_map.min().detach().cpu().item())
             d_max = float(depth_map.max().detach().cpu().item())
             if d_min < -1e-3 or d_max > 1.0 + 1e-3:

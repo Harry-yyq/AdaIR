@@ -1,4 +1,5 @@
 import os
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,6 +18,7 @@ import lightning.pytorch as pl
 from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torchmetrics import MeanMetric
+from torchvision.utils import save_image
 
 
 class AdaIRModel(pl.LightningModule):
@@ -47,6 +49,19 @@ class AdaIRModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         if len(batch) == 4:
             ([clean_name, de_id], degrad_patch, clean_patch, depth_map) = batch
+            # DAL 零初始化验证：仅在第一个 batch (Epoch 0, Step 0) 执行一次
+            if self.current_epoch == 0 and batch_idx == 0 and hasattr(self.net, "dal"):
+                with torch.no_grad():
+                    raw_depth = depth_map.detach()
+                    calibrated_depth = self.net.dal(raw_depth)
+                    diff_max = torch.abs(calibrated_depth - raw_depth).max().item()
+                    print("[DAL] Epoch 0 Step 0 零初始化检查: |calibrated - raw|.max() = {:.6f}".format(diff_max))
+                    if diff_max > 1e-6:
+                        warnings.warn(
+                            "DAL 零初始化异常：校准前后差异 |calibrated - raw|.max() = {:.6f}，期望接近 0。请检查 DAL 最后一层是否零初始化。".format(diff_max),
+                            UserWarning,
+                        )
+            # 注意：传入模型的 depth_map 保持原 tensor（不 detach），以便梯度回传到 DAL
             restored = self.net(degrad_patch, depth_map)
         else:
             ([clean_name, de_id], degrad_patch, clean_patch) = batch
@@ -75,6 +90,15 @@ class AdaIRModel(pl.LightningModule):
         return loss
 
     def on_after_backward(self):
+        # DAL 梯度监控：第一个 Step 的 backward 后，打印 DAL 最后一层 conv3 的梯度均值，确保梯度能传回
+        if self.global_step == 0 and hasattr(self.net, "dal") and hasattr(self.net.dal, "conv3"):
+            w = self.net.dal.conv3.weight
+            if w.grad is not None:
+                dal_grad_mean = w.grad.abs().mean().item()
+                print("[DAL] Epoch 0 Step 0 backward 后: dal.conv3.weight.grad 平均绝对值 = {:.6f}".format(dal_grad_mean))
+                self.log("step/dal_conv3_grad_mean", dal_grad_mean, on_step=True, on_epoch=False)
+            else:
+                print("[DAL] Epoch 0 Step 0 backward 后: dal.conv3.weight.grad 为 None（该 step 可能未使用深度）")
         if not DEBUG_MODE:
             return
         with torch.no_grad():
@@ -101,7 +125,48 @@ class AdaIRModel(pl.LightningModule):
         self._epoch_loss.reset()
         self._epoch_psnr.reset()
         self._epoch_ssim.reset()
-    
+
+    def validation_step(self, batch, batch_idx):
+        """验证一步：计算 val loss，并在第一个 batch 保存重建图与 raw/calibrated 深度对比图。"""
+        if len(batch) == 4:
+            ([clean_name, de_id], degrad_patch, clean_patch, depth_map) = batch
+            raw_depth = depth_map.detach()
+            with torch.no_grad():
+                calibrated_depth = self.net.dal(raw_depth) if hasattr(self.net, "dal") else raw_depth
+            # 验证时同样传入未 detach 的 depth_map，保证与训练一致
+            restored = self.net(degrad_patch, depth_map)
+        else:
+            ([clean_name, de_id], degrad_patch, clean_patch) = batch
+            raw_depth = calibrated_depth = None
+            restored = self.net(degrad_patch)
+
+        loss = self.loss_fn(restored, clean_patch)
+        with torch.no_grad():
+            restored_d = restored.detach().clamp(0, 1)
+            clean_d = clean_patch.detach().clamp(0, 1)
+            mse = F.mse_loss(restored_d, clean_d).clamp(min=1e-10)
+            val_psnr = (10 * torch.log10(1.0 / mse)).float().item()
+            val_ssim = pytorch_ssim(restored_d, clean_d).float().item()
+        self.log("val/loss", loss)
+        self.log("val/psnr", val_psnr)
+        self.log("val/ssim", val_ssim)
+
+        # 可视化：仅第一个 validation batch 保存重建图与 raw vs calibrated 深度并排图
+        if batch_idx != 0 or raw_depth is None:
+            return loss
+        log_dir = getattr(self.logger, "log_dir", None) or getattr(self.trainer, "log_dir", None) or "."
+        val_vis_dir = os.path.join(log_dir, "val_vis")
+        os.makedirs(val_vis_dir, exist_ok=True)
+        prefix = "epoch{:03d}".format(self.current_epoch)
+        # 重建图：取前 4 张拼成 2x2
+        save_image(restored_d[:4].clamp(0, 1), os.path.join(val_vis_dir, "{}_restored.png".format(prefix)), nrow=2)
+        # 原始深度 vs 校准深度并排（单通道复制为 3 通道便于查看）：左 raw，右 calibrated
+        raw_3 = raw_depth[:1].repeat(1, 3, 1, 1).clamp(0, 1)
+        cal_3 = calibrated_depth[:1].repeat(1, 3, 1, 1).clamp(0, 1)
+        side_by_side = torch.cat([raw_3, cal_3], dim=3)
+        save_image(side_by_side, os.path.join(val_vis_dir, "{}_raw_vs_calibrated_depth.png".format(prefix)), nrow=1)
+        return loss
+
     def lr_scheduler_step(self,scheduler,metric):
         scheduler.step(self.current_epoch)
         lr = scheduler.get_lr()
