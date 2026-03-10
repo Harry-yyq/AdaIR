@@ -70,15 +70,15 @@ def _uie_augment_pair(deg_patch, clean_patch):
 
 class UnderwaterDataset(Dataset):
     """Unified dataset for Task 7 (Underwater Image Enhancement).
-    Each sample: (degraded_patch, clean_patch) both RGB [0,1] tensors, task_id=7.
-    Returns format compatible with AdaIRTrainDataset: ([clean_name, task_id], degrad_patch, clean_patch).
+    返回: ([clean_name, task_id], degrad_patch, clean_patch, depth_patch)。
+    depth_patch: [1, P, P], 值域 [0,1]，0=浅水/前景，1=深水/背景。
+    深度图约定: .../<subset>/input/xxx.png -> .../<subset>/depth/xxx.npy 或 xxx.png。
     """
 
     def __init__(self, sample_list, patch_size, degraded_subdir="input", ref_subdir="ref"):
         """
-        sample_list: list of dicts with keys 'degrad_path', 'ref_path', 'source_id' (0=UIEB, 1=LSUI, 2=EUVP).
+        sample_list: list of dicts with keys 'degrad_path', 'ref_path', 'source_id'.
         patch_size: int.
-        degraded_subdir / ref_subdir: optional subdir names if paths are dataset roots.
         """
         self.sample_list = sample_list
         self.patch_size = patch_size
@@ -88,6 +88,47 @@ class UnderwaterDataset(Dataset):
 
     def __len__(self):
         return len(self.sample_list)
+
+    def _load_depth_map(self, degrad_path, target_size):
+        """
+        根据退化图路径加载离线深度图并 resize 到 target_size=(H,W)。
+        约定: .../uieb/input/xxx.png -> .../uieb/depth/xxx.npy 或 .png/.jpg/.jpeg。
+        若对应深度文件不存在，返回全 0.5 的 tensor（中性深度），训练可照常进行。
+        """
+        root, fname = os.path.split(degrad_path)
+        parent = os.path.dirname(root)
+        depth_dir = os.path.join(parent, "depth")
+        base_no_ext, _ = os.path.splitext(fname)
+        cand_npy = os.path.join(depth_dir, base_no_ext + ".npy")
+        cand_png = os.path.join(depth_dir, base_no_ext + ".png")
+        cand_jpg = os.path.join(depth_dir, base_no_ext + ".jpg")
+        cand_jpeg = os.path.join(depth_dir, base_no_ext + ".jpeg")
+
+        if os.path.isfile(cand_npy):
+            depth_arr = np.load(cand_npy)
+        elif os.path.isfile(cand_png):
+            depth_arr = np.array(Image.open(cand_png).convert("L"))
+        elif os.path.isfile(cand_jpg):
+            depth_arr = np.array(Image.open(cand_jpg).convert("L"))
+        elif os.path.isfile(cand_jpeg):
+            depth_arr = np.array(Image.open(cand_jpeg).convert("L"))
+        else:
+            # 深度图缺失时返回全 0.5，不报错，便于先跑通训练
+            H, W = target_size
+            return torch.full((1, H, W), 0.5, dtype=torch.float32)
+
+        depth_arr = depth_arr.astype(np.float32)
+        if depth_arr.ndim == 3:
+            depth_arr = depth_arr[..., 0]
+        H, W = target_size
+        depth_img = Image.fromarray(depth_arr)
+        depth_img = depth_img.resize((W, H), Image.BILINEAR)
+        depth_arr = np.array(depth_img).astype(np.float32)
+        if depth_arr.max() > 1.0 + 1e-3:
+            depth_arr = depth_arr / 255.0
+        depth_arr = np.clip(depth_arr, 0.0, 1.0)
+        depth_tensor = torch.from_numpy(depth_arr)[None, ...]
+        return depth_tensor
 
     def __getitem__(self, idx):
         item = self.sample_list[idx]
@@ -102,7 +143,6 @@ class UnderwaterDataset(Dataset):
 
         H, W = degrad_img.shape[0], degrad_img.shape[1]
         if H <= self.patch_size or W <= self.patch_size:
-            # edge case: exactly patch_size
             top, left = 0, 0
         else:
             top = random.randint(0, H - self.patch_size)
@@ -117,8 +157,12 @@ class UnderwaterDataset(Dataset):
         degrad_patch = self.to_tensor(degrad_patch)
         clean_patch = self.to_tensor(clean_patch)
 
+        depth_full = self._load_depth_map(degrad_path, target_size=(H, W))
+        depth_patch = depth_full[:, top : top + self.patch_size, left : left + self.patch_size]
+        depth_patch = depth_patch.clamp(0.0, 1.0)
+
         clean_name = os.path.splitext(os.path.basename(ref_path))[0]
-        return [clean_name, UIE_TASK_ID], degrad_patch, clean_patch
+        return [clean_name, UIE_TASK_ID], degrad_patch, clean_patch, depth_patch
 
 
 def _collect_pairs_from_dir(root_dir, degraded_subdir="input", ref_subdir="ref", source_id=0, exclude_basenames=None):
