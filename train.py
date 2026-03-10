@@ -6,7 +6,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from utils.dataset_utils import AdaIRTrainDataset, get_uie_train_val_datasets_and_sampler
-from net.model import AdaIR
+from net.model import AdaIR, DEBUG_MODE
 from utils.checkpoint_utils import load_adair_ckpt_for_uie_finetune
 from utils.schedulers import LinearWarmupCosineAnnealingLR
 from utils.pytorch_ssim import ssim as pytorch_ssim
@@ -25,6 +25,17 @@ class AdaIRModel(pl.LightningModule):
         self.lr = lr
         self.net = AdaIR(decoder=True)
         self.loss_fn = nn.L1Loss()
+        if DEBUG_MODE:
+            with torch.no_grad():
+                for m in self.net.modules():
+                    if getattr(m, "is_sft", False):
+                        C = m.channels
+                        dummy_feat = torch.randn(1, C, 16, 16)
+                        dummy_depth = torch.full((1, 1, 16, 16), 0.5)
+                        out = m(dummy_depth, dummy_feat)
+                        err = (out - dummy_feat).abs().max().item()
+                        assert err < 1e-6, "SFT zero-init check failed, max diff={}".format(err)
+            print("[DEBUG] SFT zero-init check passed (out = feat).")
         # 用于汇总每个 epoch 的均值（DDP 下会跨卡同步）
         self._epoch_loss = MeanMetric(sync_on_compute=True)
         self._epoch_psnr = MeanMetric(sync_on_compute=True)
@@ -34,8 +45,12 @@ class AdaIRModel(pl.LightningModule):
         return self.net(x)
 
     def training_step(self, batch, batch_idx):
-        ([clean_name, de_id], degrad_patch, clean_patch) = batch
-        restored = self.net(degrad_patch)
+        if len(batch) == 4:
+            ([clean_name, de_id], degrad_patch, clean_patch, depth_map) = batch
+            restored = self.net(degrad_patch, depth_map)
+        else:
+            ([clean_name, de_id], degrad_patch, clean_patch) = batch
+            restored = self.net(degrad_patch)
 
         loss = self.loss_fn(restored, clean_patch)
 
@@ -58,6 +73,21 @@ class AdaIRModel(pl.LightningModule):
         self._epoch_ssim.update(step_ssim)
 
         return loss
+
+    def on_after_backward(self):
+        if not DEBUG_MODE:
+            return
+        with torch.no_grad():
+            grads = []
+            for m in self.net.modules():
+                if getattr(m, "is_sft", False):
+                    if m.scale_conv2.weight.grad is not None:
+                        grads.append(m.scale_conv2.weight.grad.abs().mean().item())
+                    if m.shift_conv2.weight.grad is not None:
+                        grads.append(m.shift_conv2.weight.grad.abs().mean().item())
+            if grads:
+                g_mean = float(np.mean(grads))
+                self.log("step/sft_grad_mean", g_mean, on_step=True, on_epoch=False)
 
     def on_train_epoch_end(self):
         # 每个 epoch 结束记录本 epoch 平均 loss / PSNR / SSIM（含下划线 key 供 best_ckpt 文件名格式化）

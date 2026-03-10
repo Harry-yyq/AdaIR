@@ -265,6 +265,54 @@ class ChannelGate(nn.Module):
         return scale
 
 ##########################################################################
+## UG-AdaIR: 深度引导空间特征变换 (SFT)，Zero-Conv 初始化保证初始恒等
+DEBUG_MODE = True
+
+
+class SpatialFeatureTransform(nn.Module):
+    """
+    输入: depth (B,1,H,W), feat (B,C,H,W)
+    输出: out = feat * (1 + scale) + shift
+    生成 scale/shift 的最后一层 Conv 零初始化，初始时 out = feat。
+    """
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.is_sft = True
+
+        self.scale_conv1 = nn.Conv2d(1, channels, kernel_size=3, padding=1)
+        self.scale_act = nn.LeakyReLU(0.1, inplace=True)
+        self.scale_conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+
+        self.shift_conv1 = nn.Conv2d(1, channels, kernel_size=3, padding=1)
+        self.shift_act = nn.LeakyReLU(0.1, inplace=True)
+        self.shift_conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+
+        self._init_zero()
+
+    def _init_zero(self):
+        nn.init.zeros_(self.scale_conv2.weight)
+        nn.init.zeros_(self.scale_conv2.bias)
+        nn.init.zeros_(self.shift_conv2.weight)
+        nn.init.zeros_(self.shift_conv2.bias)
+
+    def forward(self, depth, feat):
+        B, C, H, W = feat.shape
+        if depth.shape[-2:] != (H, W):
+            depth = F.interpolate(depth, size=(H, W), mode='bilinear', align_corners=False)
+        depth = depth.clamp(0.0, 1.0)
+
+        scale = self.scale_conv2(self.scale_act(self.scale_conv1(depth)))
+        shift = self.shift_conv2(self.shift_act(self.shift_conv1(depth)))
+
+        if DEBUG_MODE:
+            assert feat.shape[-2:] == scale.shape[-2:], "SFT feat/scale H,W mismatch"
+            assert feat.shape == shift.shape, "SFT feat/shift shape mismatch"
+
+        return feat * (1.0 + scale) + shift
+
+
+##########################################################################
 ## Frequency Modulation Module (FMoM)
 class FreRefine(nn.Module):
     def __init__(self, dim):
@@ -309,17 +357,26 @@ class FreModule(nn.Module):
             nn.GELU(),
             nn.Conv2d(dim//8, 2, 1, bias=False),
         )
+        self.sft_low = SpatialFeatureTransform(dim)
+        self.sft_high = SpatialFeatureTransform(dim)
 
-    def forward(self, x, y):
+    def forward(self, x, y, depth=None):
         _, _, H, W = y.size()
-        x = F.interpolate(x, (H,W), mode='bilinear')
-        
-        high_feature, low_feature = self.fft(x) 
+        x = F.interpolate(x, (H, W), mode='bilinear')
 
-        high_feature = self.channel_cross_l(high_feature, y)
-        low_feature = self.channel_cross_h(low_feature, y)
+        high_feature, low_feature = self.fft(x)
+        high_mod = high_feature
+        low_mod = low_feature
 
-        agg = self.frequency_refine(low_feature, high_feature)
+        if depth is not None:
+            depth_deep = F.interpolate(depth, size=low_feature.shape[-2:], mode='bilinear', align_corners=False).clamp(0.0, 1.0)
+            depth_shallow = 1.0 - depth_deep
+            low_mod = self.sft_low(depth_deep, low_feature) * depth_deep
+            high_mod = self.sft_high(depth_shallow, high_feature) * depth_shallow
+
+        high_mod = self.channel_cross_l(high_mod, y)
+        low_mod = self.channel_cross_h(low_mod, y)
+        agg = self.frequency_refine(low_mod, high_mod)
         out = self.channel_cross_agg(y, agg)
 
         return out * self.para1 + y * self.para2
@@ -423,7 +480,13 @@ class AdaIR(nn.Module):
                     
         self.output = nn.Conv2d(int(dim*2**1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
-    def forward(self, inp_img,noise_emb = None):
+    def forward(self, inp_img, depth_map=None, noise_emb=None):
+        if DEBUG_MODE and depth_map is not None:
+            d_min = float(depth_map.min().detach().cpu().item())
+            d_max = float(depth_map.max().detach().cpu().item())
+            if d_min < -1e-3 or d_max > 1.0 + 1e-3:
+                import warnings
+                warnings.warn("depth_map value range abnormal: min={:.4f}, max={:.4f} (expected [0,1])".format(d_min, d_max))
 
         inp_enc_level1 = self.patch_embed(inp_img)
 
@@ -441,7 +504,7 @@ class AdaIR(nn.Module):
         latent = self.latent(inp_enc_level4) 
 
         if self.decoder:
-            latent = self.fre1(inp_img, latent)
+            latent = self.fre1(inp_img, latent, depth_map)
       
         inp_dec_level3 = self.up4_3(latent)
 
@@ -451,7 +514,7 @@ class AdaIR(nn.Module):
         out_dec_level3 = self.decoder_level3(inp_dec_level3) 
 
         if self.decoder:
-            out_dec_level3 = self.fre2(inp_img, out_dec_level3)
+            out_dec_level3 = self.fre2(inp_img, out_dec_level3, depth_map)
 
         inp_dec_level2 = self.up3_2(out_dec_level3)
         inp_dec_level2 = torch.cat([inp_dec_level2, out_enc_level2], 1)
@@ -460,7 +523,7 @@ class AdaIR(nn.Module):
         out_dec_level2 = self.decoder_level2(inp_dec_level2)
 
         if self.decoder:
-            out_dec_level2 = self.fre3(inp_img, out_dec_level2)
+            out_dec_level2 = self.fre3(inp_img, out_dec_level2, depth_map)
 
         inp_dec_level1 = self.up2_1(out_dec_level2)
         inp_dec_level1 = torch.cat([inp_dec_level1, out_enc_level1], 1)
