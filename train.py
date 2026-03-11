@@ -102,10 +102,22 @@ class AdaIRModel(pl.LightningModule):
         self._epoch_psnr.reset()
         self._epoch_ssim.reset()
     
-    def lr_scheduler_step(self,scheduler,metric):
-        scheduler.step(self.current_epoch)
-        lr = scheduler.get_lr()
-    
+    def lr_scheduler_step(self, scheduler, metric):
+        # 按 epoch 步进；不传 epoch 避免弃用警告，由 scheduler 内部计数
+        scheduler.step()
+
+    def validation_step(self, batch, batch_idx):
+        """验证一步：与 training_step 一致的前向与 loss，用于 UIE 等有 val_loader 的场景。"""
+        if len(batch) == 4:
+            ([_, _], degrad_patch, clean_patch, depth_map) = batch
+            restored = self.net(degrad_patch, depth_map)
+        else:
+            ([_, _], degrad_patch, clean_patch) = batch
+            restored = self.net(degrad_patch)
+        loss = self.loss_fn(restored, clean_patch)
+        self.log("val_loss", loss, on_step=False, on_epoch=True)
+        return loss
+
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
         scheduler = LinearWarmupCosineAnnealingLR(optimizer=optimizer, warmup_epochs=15, max_epochs=180)
@@ -123,13 +135,16 @@ def main():
             offline=opt.wandb_offline,
             save_dir="wandb",
         )
-        # 将全部命令行参数记入 wandb.config（部分环境里 config 为方法，需先取再 update）
-        _config = logger.experiment.config
-        if callable(_config):
-            _config = _config()
-        if hasattr(_config, "update"):
-            _config.update(vars(opt), allow_val_change=True)
-        if opt.wandb_offline:
+        # 将全部命令行参数记入 wandb.config（首次访问可能触发 init，网络异常时会卡住）
+        try:
+            _config = logger.experiment.config
+            if callable(_config):
+                _config = _config()
+            if hasattr(_config, "update"):
+                _config.update(vars(opt), allow_val_change=True)
+        except Exception as e:
+            print("[wandb] config.update 失败 (可忽略或使用 --wandb_offline):", e)
+        if getattr(opt, "wandb_offline", False):
             print("wandb 离线模式：数据将保存在 ./wandb/ 下，联网后执行: wandb sync ./wandb/offline-run-* 可上传")
     else:
         logger = TensorBoardLogger(save_dir = "logs/")
