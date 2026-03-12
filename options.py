@@ -5,7 +5,7 @@ parser = argparse.ArgumentParser()
 # 训练主参数
 parser.add_argument("--epochs", type=int, default=150, help="训练轮数")
 parser.add_argument("--batch_size", type=int, default=8, help="每 GPU batch size")
-parser.add_argument("--lr", type=float, default=2e-4, help="学习率")
+parser.add_argument("--lr", type=float, default=None, help="固定学习率，全程使用；不指定则使用动态学习率（base 1e-5, eccm 1e-4 + warmup cosine）")
 parser.add_argument("--grad_clip", type=float, default=0.5, help="梯度裁剪阈值（梯度范数上限），0 表示不裁剪")
 parser.add_argument("--patch_size", type=int, default=128, help="训练 patch 边长")
 parser.add_argument("--num_workers", type=int, default=16, help="DataLoader workers")

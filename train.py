@@ -20,8 +20,9 @@ from torchmetrics import MeanMetric
 
 
 class AdaIRModel(pl.LightningModule):
-    def __init__(self, lr=2e-4):
+    def __init__(self, lr=None):
         super().__init__()
+        # lr=None：使用动态学习率（双组 + warmup cosine）；lr 为 float：全程固定学习率
         self.lr = lr
         self.net = AdaIR(decoder=True)
         self.loss_fn = nn.L1Loss()
@@ -48,9 +49,16 @@ class AdaIRModel(pl.LightningModule):
         if len(batch) == 4:
             ([clean_name, de_id], degrad_patch, clean_patch, depth_map) = batch
             restored = self.net(degrad_patch, depth_map)
+            # 启动时打印一次：确认 DataLoader 把深度图传进来了，ECCM 会执行
+            if self.current_epoch == 0 and batch_idx == 0 and getattr(self, "_depth_usage_logged", True) is True:
+                self._depth_usage_logged = False
+                print("\n[DataLoader] ✅ 本 run 使用 4 元组 batch，depth_map 已传入网络，ECCM 会参与前向与反传。\n")
         else:
             ([clean_name, de_id], degrad_patch, clean_patch) = batch
             restored = self.net(degrad_patch)
+            if self.current_epoch == 0 and batch_idx == 0 and getattr(self, "_depth_usage_logged", True) is True:
+                self._depth_usage_logged = False
+                print("\n[DataLoader] ⚠️ 本 run 使用 3 元组 batch，depth_map 始终为 None，ECCM 不会执行！若需训练 ECCM，请使用 --train_uie_only 及带 depth 的数据。\n")
 
         loss = self.loss_fn(restored, clean_patch)
 
@@ -119,10 +127,52 @@ class AdaIRModel(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = optim.AdamW(self.parameters(), lr=self.lr)
-        scheduler = LinearWarmupCosineAnnealingLR(optimizer=optimizer, warmup_epochs=15, max_epochs=180)
+        eccm_params = []
+        base_params = []
+        for name, param in self.named_parameters():
+            if "eccm" in name.lower():
+                eccm_params.append(param)
+            else:
+                base_params.append(param)
 
-        return [optimizer], [scheduler]
+        print("\n[Debug] === 优化器参数注册自查 ===")
+        print(f"👉 捕获到的 ECCM 参数张量数量: {len(eccm_params)}")
+        print(f"👉 捕获到的 Base 参数张量数量: {len(base_params)}")
+        if len(eccm_params) == 0:
+            raise ValueError("🚨 致命错误：优化器没有捕获到任何 ECCM 参数！请检查模型中的变量命名。")
+        print("================================\n")
+
+        weight_decay = 1e-4
+        if self.lr is not None:
+            # 指定了 --lr：全程固定学习率，所有参数同一 lr，不使用 scheduler
+            optimizer = optim.AdamW(self.parameters(), lr=self.lr, weight_decay=weight_decay)
+            print("[LR] 使用固定学习率: {}".format(self.lr))
+            return [optimizer]
+        else:
+            # 未指定 --lr：动态学习率，base 1e-5 / eccm 1e-3 + warmup cosine
+            optimizer = optim.AdamW(
+                [
+                    {"params": base_params, "lr": 1e-5},
+                    {"params": eccm_params, "lr": 1e-3},
+                ],
+                weight_decay=weight_decay,
+            )
+            scheduler = LinearWarmupCosineAnnealingLR(optimizer=optimizer, warmup_epochs=15, max_epochs=180)
+            print("[LR] 使用动态学习率: base 1e-5, eccm 1e-4 + LinearWarmupCosineAnnealingLR")
+            return [optimizer], [scheduler]
+
+    def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
+        # 梯度探针：检查 ECCM 最后一层梯度是否存活（backward 后、step 前）
+        if hasattr(self.net, "eccm") and hasattr(self.net.eccm, "depth_projector"):
+            last_layer = self.net.eccm.depth_projector[-1]
+            w = last_layer.weight
+            if w.grad is None:
+                print("🚨 警报：ECCM 最后一层梯度为 None")
+            else:
+                abs_mean = w.grad.abs().mean().item()
+                print("✅ ECCM 梯度存活，Abs Mean: {:.6f}".format(abs_mean))
+        # 梯度裁剪，防止梯度假死/爆炸
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.01)
 
 
 def main():
@@ -205,7 +255,7 @@ def main():
         save_top_k=1,
         save_last=False,
     )
-    model = AdaIRModel(lr=getattr(opt, "lr", 2e-4))
+    model = AdaIRModel(lr=opt.lr)
 
     if getattr(opt, "resume_ckpt", None):
         info = load_adair_ckpt_for_uie_finetune(

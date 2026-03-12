@@ -264,6 +264,36 @@ class ChannelGate(nn.Module):
         scale = F.sigmoid(scale)
         return scale
 
+
+##########################################################################
+## UG-AdaIR: 早期色彩校正模块 (ECCM)，参考 DarkIR，零初始化保证初始恒等
+class EarlyColorCorrectionModule(nn.Module):
+    def __init__(self, in_channels=48):
+        super().__init__()
+        # 利用深度图生成空间-通道不对称的调制权重
+        self.depth_projector = nn.Sequential(
+            nn.Conv2d(1, in_channels // 2, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(in_channels // 2, in_channels, kernel_size=3, padding=1)
+        )
+        # 【强制零初始化】：保证初始状态下输出为0，网络等价于原版，防止Loss爆炸
+        nn.init.constant_(self.depth_projector[-1].weight, 0)
+        nn.init.constant_(self.depth_projector[-1].bias, 0)
+        # 改成这两行：
+
+        
+
+    def forward(self, x, depth_map):
+        # 尺寸对齐
+        if depth_map.shape[-2:] != x.shape[-2:]:
+            depth_map = F.interpolate(depth_map, size=x.shape[-2:], mode='bilinear', align_corners=False)
+        # 限制放大倍数，Tanh 的输出在 -1 到 1 之间
+        scale = torch.tanh(self.depth_projector(depth_map))
+        # 乘法门控残差：允许最大放大 2 倍，最小变为 0
+        corrected_x = x * (1.0 + scale)
+        return corrected_x
+
+
 ##########################################################################
 ## UG-AdaIR: 深度引导空间特征变换 (SFT)，Zero-Conv 初始化保证初始恒等
 DEBUG_MODE = True
@@ -442,7 +472,8 @@ class AdaIR(nn.Module):
 
         super(AdaIR, self).__init__()
 
-        self.patch_embed = OverlapPatchEmbed(inp_channels, dim)        
+        self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
+        self.eccm = EarlyColorCorrectionModule(in_channels=dim)
         self.decoder = decoder
         
         if self.decoder:
@@ -481,6 +512,7 @@ class AdaIR(nn.Module):
         self.output = nn.Conv2d(int(dim*2**1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
     def forward(self, inp_img, depth_map=None, noise_emb=None):
+        # depth_map 为 0~1 张量，原样向下传递；仅在早期阶段用于 ECCM 色彩校正
         if DEBUG_MODE and depth_map is not None:
             d_min = float(depth_map.min().detach().cpu().item())
             d_max = float(depth_map.max().detach().cpu().item())
@@ -488,9 +520,11 @@ class AdaIR(nn.Module):
                 import warnings
                 warnings.warn("depth_map value range abnormal: min={:.4f}, max={:.4f} (expected [0,1])".format(d_min, d_max))
 
-        inp_enc_level1 = self.patch_embed(inp_img)
+        feat = self.patch_embed(inp_img)
+        if depth_map is not None:
+            feat = self.eccm(feat, depth_map)
 
-        out_enc_level1 = self.encoder_level1(inp_enc_level1)
+        out_enc_level1 = self.encoder_level1(feat)
         
         inp_enc_level2 = self.down1_2(out_enc_level1)
 

@@ -11,21 +11,28 @@ inp_img (B,3,H,W) [+ depth_map (B,1,H,W) 可选]
     │
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Encoder (下采样 3 次：H/2, H/4, H/8)                             │
-│  patch_embed → L1 → down → L2 → down → L3 → down → latent        │
+│  浅层特征 + 早期色彩校正 (ECCM)                                    │
+│  feat = patch_embed(inp_img)                                     │
+│  若 depth_map 非空: feat = eccm(feat, depth_map)                 │
 └─────────────────────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Bottleneck + 频率调制 (FMoM)                                    │
+│  Encoder (下采样 3 次：H/2, H/4, H/8)                             │
+│  L1 → down → L2 → down → L3 → down → latent                       │
+└─────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Bottleneck + 频率调制 (FMoM)                                     │
 │  latent → fre1(inp_img, latent, depth_map) → 上采样              │
 └─────────────────────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Decoder (上采样 + skip + FMoM ×2)                               │
-│  up→concat→L3→fre2(...) → up→concat→L2 → up→concat→L1           │
-│  → refinement → output + inp_img                                 │
+│  Decoder (上采样 + skip + FMoM ×2)                                │
+│  up→concat→L3→fre2(...) → up→concat→L2 → up→concat→L1            │
+│  → refinement → output + inp_img                                  │
 └─────────────────────────────────────────────────────────────────┘
     │
     ▼
@@ -41,6 +48,7 @@ out (B,3,H,W)
 | 子模块 | 说明 | 通道/分辨率 |
 |--------|------|-------------|
 | **patch_embed** | OverlapPatchEmbed(3→48), 3×3 conv | 输入 (B,3,H,W) → (B,48,H,W) |
+| **eccm** | EarlyColorCorrectionModule(48)，仅当 depth_map 非空时执行 | (B,48,H,W) → (B,48,H,W) |
 | **encoder_level1** | 4× TransformerBlock(dim=48, heads=1) | (B,48,H,W) |
 | **down1_2** | Downsample: Conv3×3 + PixelUnshuffle(2) | (B,48,H,W) → (B,96,H/2,W/2) |
 | **encoder_level2** | 6× TransformerBlock(dim=96, heads=2) | (B,96,H/2,W/2) |
@@ -64,7 +72,17 @@ out (B,3,H,W)
 
 ---
 
-### 2. TransformerBlock（Encoder/Decoder 共用）
+### 2. EarlyColorCorrectionModule (ECCM，早期色彩校正)
+
+- **输入**：`x` 当前层特征 (B,C,H,W)，`depth_map` (B,1,H,W)，0~1。
+- **输出**：`corrected_x = x * (1.0 + scale)`，与 `x` 同形状；`scale = tanh(depth_projector(depth_map))`，范围 (-1, 1)，故输出约为 [0, 2]×x。
+- **结构**：
+  - **depth_projector**：Conv2d(1→C/2, 3×3) → GELU → Conv2d(C/2→C, 3×3)，**最后一层零初始化**，初始时 scale≈0，corrected_x≈x。
+- **作用**：在 Encoder 最前端用深度图对浅层特征做乘法门控，参考 DarkIR 的早期色彩校正；零初始化保证未训时等价于原版。
+
+---
+
+### 3. TransformerBlock（Encoder/Decoder 共用）
 
 ```
 x → LayerNorm → Attention(MDTA) → (+) → LayerNorm → FeedForward(GDFN) → (+) → out
@@ -75,60 +93,46 @@ x → LayerNorm → Attention(MDTA) → (+) → LayerNorm → FeedForward(GDFN) 
 
 ---
 
-### 3. FreModule（频率调制 + 深度引导，UG-AdaIR 扩展）
+### 4. FreModule（频率调制 + 深度引导）
 
 - **输入**：`x` 原图 (B,3,·,·)，`y` 当前层特征 (B,C,H,W)，`depth` (B,1,·,·) 可选。
 - **流程**：
   1. 将 `x` 插值到 (H,W)，经 **fft()** 拆成 high_feature、low_feature。
-  2. 若 `depth is not None`：
-     - 将 depth 插值到 (H,W)，得到 depth_deep、depth_shallow=1-depth。
-     - **sft_low**(depth_deep, low_feature) → low_mod，再乘 depth_deep。
-     - **sft_high**(depth_shallow, high_feature) → high_mod，再乘 depth_shallow。
-  3. **channel_cross_l**(high_feature, y)、**channel_cross_h**(low_feature, y)。
-  4. **frequency_refine**(low, high) → agg。
+  2. 若 `depth is not None`：depth 插值 → depth_deep / depth_shallow → **sft_low**、**sft_high** 调制 → high_mod、low_mod。
+  3. **channel_cross_l**(high_mod, y)、**channel_cross_h**(low_mod, y)。
+  4. **frequency_refine**(low_mod, high_mod) → agg。
   5. **channel_cross_agg**(y, agg) → out，返回 `out*para1 + y*para2`。
 
-子模块：
-
-| 子模块 | 说明 |
-|--------|------|
-| conv1 | Conv2d(3, C, 3×3)，用于 fft 分支 |
-| rate_conv | 自适应阈值生成 mask（C→C/8→2, Sigmoid） |
-| fft | FFT2 → 高/低频 mask 分离 → IFFT2 → abs → high, low |
-| **sft_low** | SpatialFeatureTransform(C)，深度调制低频 |
-| **sft_high** | SpatialFeatureTransform(C)，(1-depth) 调制高频 |
-| channel_cross_l / channel_cross_h / channel_cross_agg | Chanel_Cross_Attention |
-| frequency_refine | FreRefine：SpatialGate + ChannelGate + 融合 |
+子模块：conv1, rate_conv, fft, **sft_low**, **sft_high**, channel_cross_l/h/agg, frequency_refine。
 
 ---
 
-### 4. SpatialFeatureTransform (SFT，UG-AdaIR 新增)
+### 5. SpatialFeatureTransform (SFT)
 
 - **输入**：depth (B,1,H,W)，feat (B,C,H,W)。
-- **输出**：`feat * (1 + scale) + shift`，其中 scale、shift 由两条分支从 depth 生成，**最后一层 Conv 零初始化**，初始时 out=feat。
-- **结构**：
-  - scale 分支：Conv2d(1→C, 3×3) → LeakyReLU → Conv2d(C→C, 3×3)，零初始化。
-  - shift 分支：Conv2d(1→C, 3×3) → LeakyReLU → Conv2d(C→C, 3×3)，零初始化。
+- **输出**：`feat * (1 + scale) + shift`，scale/shift 由 depth 经两条 Conv 分支生成，**最后一层零初始化**，初始时 out=feat。
 
 ---
 
-### 5. 其他基础块
+### 6. 其他基础块
 
 | 模块 | 作用 |
 |------|------|
 | OverlapPatchEmbed | Conv2d(in_c, embed_dim, 3×3, pad=1) |
-| Downsample | Conv2d(n_feat, n_feat//2, 3×3) + PixelUnshuffle(2)，分辨率/2，通道/2 |
-| Upsample | Conv2d(n_feat, n_feat*2, 3×3) + PixelShuffle(2)，分辨率×2，通道/2 |
-| Chanel_Cross_Attention | q 来自 x，kv 来自 y，通道维 cross attention |
-| FreRefine | SpatialGate(high) 加权 high，ChannelGate(low) 加权 low，相加后 1×1 conv |
+| Downsample | Conv2d + PixelUnshuffle(2)，分辨率/2，通道/2 |
+| Upsample | Conv2d + PixelShuffle(2)，分辨率×2，通道/2 |
+| Chanel_Cross_Attention | 通道维 cross attention |
+| FreRefine | SpatialGate + ChannelGate + 融合 |
 
 ---
 
-## 三、参数量与分辨率对应（示例 H=W=256）
+## 三、分辨率与通道对应（示例 H=W=256）
 
 | 阶段 | 分辨率 | 通道 dim |
 |------|--------|----------|
 | 输入 | 256×256 | 3 |
+| patch_embed | 256×256 | 48 |
+| eccm（若用 depth） | 256×256 | 48 |
 | L1 后 | 256×256 | 48 |
 | L2 后 | 128×128 | 96 |
 | L3 后 | 64×64 | 192 |
@@ -145,9 +149,9 @@ x → LayerNorm → Attention(MDTA) → (+) → LayerNorm → FeedForward(GDFN) 
 ## 四、forward 接口
 
 ```python
-# 训练 UIE（带深度）
+# 训练 UIE（带深度）：ECCM + FreModule 均使用 depth_map
 out = net(inp_img, depth_map)   # depth_map: (B,1,H,W), 0~1
 
-# 多任务 / 测试（无深度）
-out = net(inp_img)              # depth_map=None，FMoM 中不执行 SFT 与深度门控
+# 多任务 / 测试（无深度）：不执行 ECCM，FMoM 中不执行 SFT 与深度门控
+out = net(inp_img)              # depth_map=None
 ```
