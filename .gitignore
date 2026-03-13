@@ -172,6 +172,11 @@ checkpoints/
 *.ckpt
 *.safetensors
 
+# Weights & Biases（训练日志、run 数据不上传）
+wandb/
+
 /AdaIR
 /AdaIR_results
 
+wandb/
+*.wandb
