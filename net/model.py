@@ -473,7 +473,6 @@ class AdaIR(nn.Module):
         super(AdaIR, self).__init__()
 
         self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
-        self.eccm = EarlyColorCorrectionModule(in_channels=dim)
         self.decoder = decoder
         
         if self.decoder:
@@ -493,7 +492,8 @@ class AdaIR(nn.Module):
 
         self.down3_4 = Downsample(int(dim*2**2)) ## From Level 3 to Level 4
         self.latent = nn.Sequential(*[TransformerBlock(dim=int(dim*2**3), num_heads=heads[3], ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[3])])
-        
+        self.eccm = EarlyColorCorrectionModule(in_channels=384)
+
         self.up4_3 = Upsample(int(dim*2**3)) ## From Level 4 to Level 3
         self.reduce_chan_level3 = nn.Conv2d(int(dim*2**3), int(dim*2**2), kernel_size=1, bias=bias)
 
@@ -512,7 +512,7 @@ class AdaIR(nn.Module):
         self.output = nn.Conv2d(int(dim*2**1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
     def forward(self, inp_img, depth_map=None, noise_emb=None):
-        # depth_map 为 0~1 张量，原样向下传递；仅在早期阶段用于 ECCM 色彩校正
+        # depth_map 为 0~1 张量，在瓶颈 latent 之后经 ECCM 做色彩/光照校正（分辨率 H/8,W/8，通道 384）
         if DEBUG_MODE and depth_map is not None:
             d_min = float(depth_map.min().detach().cpu().item())
             d_max = float(depth_map.max().detach().cpu().item())
@@ -521,9 +521,6 @@ class AdaIR(nn.Module):
                 warnings.warn("depth_map value range abnormal: min={:.4f}, max={:.4f} (expected [0,1])".format(d_min, d_max))
 
         feat = self.patch_embed(inp_img)
-        if depth_map is not None:
-            feat = self.eccm(feat, depth_map)
-
         out_enc_level1 = self.encoder_level1(feat)
         
         inp_enc_level2 = self.down1_2(out_enc_level1)
@@ -534,13 +531,15 @@ class AdaIR(nn.Module):
 
         out_enc_level3 = self.encoder_level3(inp_enc_level3) 
 
-        inp_enc_level4 = self.down3_4(out_enc_level3)        
-        latent = self.latent(inp_enc_level4) 
+        inp_enc_level4 = self.down3_4(out_enc_level3)
+        feat = self.latent(inp_enc_level4)
+        if depth_map is not None:
+            feat = self.eccm(feat, depth_map)
 
         if self.decoder:
-            latent = self.fre1(inp_img, latent, depth_map)
+            feat = self.fre1(inp_img, feat, depth_map)
       
-        inp_dec_level3 = self.up4_3(latent)
+        inp_dec_level3 = self.up4_3(feat)
 
         inp_dec_level3 = torch.cat([inp_dec_level3, out_enc_level3], 1)
         inp_dec_level3 = self.reduce_chan_level3(inp_dec_level3)

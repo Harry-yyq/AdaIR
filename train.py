@@ -127,39 +127,42 @@ class AdaIRModel(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        eccm_params = []
-        base_params = []
-        for name, param in self.named_parameters():
-            if "eccm" in name.lower():
-                eccm_params.append(param)
-            else:
-                base_params.append(param)
-
-        print("\n[Debug] === 优化器参数注册自查 ===")
-        print(f"👉 捕获到的 ECCM 参数张量数量: {len(eccm_params)}")
-        print(f"👉 捕获到的 Base 参数张量数量: {len(base_params)}")
-        if len(eccm_params) == 0:
-            raise ValueError("🚨 致命错误：优化器没有捕获到任何 ECCM 参数！请检查模型中的变量命名。")
-        print("================================\n")
-
+        print("\n" + "🚀"*15)
+        print("[路线 B] 启动硬核模式：全网络从零开始训练 (Train from Scratch)！")
+        
         weight_decay = 1e-4
+        
+        # 如果命令行指定了固定 LR，则走固定路线（不推荐从头训练时使用）
         if self.lr is not None:
-            # 指定了 --lr：全程固定学习率，所有参数同一 lr，不使用 scheduler
             optimizer = optim.AdamW(self.parameters(), lr=self.lr, weight_decay=weight_decay)
-            print("[LR] 使用固定学习率: {}".format(self.lr))
+            print(f"[LR] ⚠️ 警告: 使用了固定全局学习率: {self.lr} (无退火)")
             return [optimizer]
-        else:
-            # 未指定 --lr：动态学习率，base 1e-5 / eccm 1e-3 + warmup cosine
-            optimizer = optim.AdamW(
-                [
-                    {"params": base_params, "lr": 1e-5},
-                    {"params": eccm_params, "lr": 1e-3},
-                ],
-                weight_decay=weight_decay,
-            )
-            scheduler = LinearWarmupCosineAnnealingLR(optimizer=optimizer, warmup_epochs=15, max_epochs=180)
-            print("[LR] 使用动态学习率: base 1e-5, eccm 1e-4 + LinearWarmupCosineAnnealingLR")
-            return [optimizer], [scheduler]
+            
+        # ==========================================
+        # 核心：标准 Transformer 从头训练调度策略
+        # ==========================================
+        # 全局大初始学习率，适用于随机初始化的模型快速收敛
+        base_lr = 4e-4 
+        
+        # 所有人一视同仁，统一步伐
+        optimizer = optim.AdamW(self.parameters(), lr=base_lr, weight_decay=weight_decay)
+        
+        # 动态获取 trainer 中设置的总 epoch 数，保证余弦退火周期完美贴合
+        max_epochs = self.trainer.max_epochs if self.trainer is not None else 180
+        warmup_epochs = 15 # 前 15 个 epoch 热身，防止初始梯度爆炸
+        
+        # 使用代码中已有的调度器
+        scheduler = LinearWarmupCosineAnnealingLR(
+            optimizer=optimizer, 
+            warmup_epochs=warmup_epochs, 
+            max_epochs=max_epochs
+        )
+        
+        print(f"[LR] ✅ 全局大初始学习率: {base_lr}")
+        print(f"[LR] ✅ 启用余弦退火调度器: Warmup {warmup_epochs} epochs, 总 {max_epochs} epochs")
+        print("🚀"*15 + "\n")
+        
+        return [optimizer], [scheduler]
 
     def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
         # 梯度探针：检查 ECCM 最后一层梯度是否存活（backward 后、step 前）
