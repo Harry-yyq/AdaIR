@@ -1,0 +1,10 @@
+========== AdaIRModel Loss 配置摘要 ==========
+主损失 (self.loss_fn):
+  - 类型: L1Loss
+  - 计算: loss = loss_fn(restored, clean_patch)
+
+当前未使用的损失:
+  - 感知损失 (Perceptual): 未使用
+  - 色彩/余弦损失 (Cosine): 未使用
+  - 其他多任务权重: 无
+==========================================

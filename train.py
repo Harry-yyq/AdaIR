@@ -18,14 +18,42 @@ from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torchmetrics import MeanMetric
 
+# Loss 配置摘要与 ECCM 统计日志统一落盘目录
+OUTPUT_DIR = "output"
+LOSS_CONFIG_SUMMARY_PATH = os.path.join(OUTPUT_DIR, "loss_config_summary.txt")
+
+
+def _build_loss_config_summary(loss_fn, extra_weights=None):
+    """构建当前 Loss 配置的说明文本，便于一眼看清组合与权重。"""
+    lines = [
+        "========== AdaIRModel Loss 配置摘要 ==========",
+        "主损失 (self.loss_fn):",
+        "  - 类型: {}".format(type(loss_fn).__name__),
+        "  - 计算: loss = loss_fn(restored, clean_patch)",
+    ]
+    if extra_weights:
+        for k, v in extra_weights.items():
+            lines.append("  - {}: {}".format(k, v))
+    lines.append("")
+    lines.append("当前未使用的损失:")
+    lines.append("  - 感知损失 (Perceptual): 未使用")
+    lines.append("  - 色彩/余弦损失 (Cosine): 未使用")
+    lines.append("  - 其他多任务权重: 无")
+    lines.append("==========================================")
+    return "\n".join(lines)
+
 
 class AdaIRModel(pl.LightningModule):
-    def __init__(self, lr=None):
+    def __init__(self, lr=None, max_epochs=None, grad_clip=0.5):
         super().__init__()
         # lr=None：使用动态学习率（双组 + warmup cosine）；lr 为 float：全程固定学习率
         self.lr = lr
+        self._max_epochs = max_epochs
+        self.grad_clip = grad_clip
         self.net = AdaIR(decoder=True)
         self.loss_fn = nn.L1Loss()
+        # Loss 配置摘要：打印并保存到 output/loss_config_summary.txt
+        self._print_and_save_loss_config_summary()
         if DEBUG_MODE:
             with torch.no_grad():
                 for m in self.net.modules():
@@ -42,23 +70,28 @@ class AdaIRModel(pl.LightningModule):
         self._epoch_psnr = MeanMetric(sync_on_compute=True)
         self._epoch_ssim = MeanMetric(sync_on_compute=True)
 
+    def _print_and_save_loss_config_summary(self):
+        """保存当前 Loss 组合与权重到 output/loss_config_summary.txt，终端仅提示一行。"""
+        summary = _build_loss_config_summary(self.loss_fn)
+        try:
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            with open(LOSS_CONFIG_SUMMARY_PATH, "w", encoding="utf-8") as f:
+                f.write(summary)
+            print("[Loss] 配置已保存至: {}".format(LOSS_CONFIG_SUMMARY_PATH))
+        except Exception as e:
+            print("[Loss] 保存配置摘要失败: {}".format(e))
+
     def forward(self, x):
         return self.net(x)
 
     def training_step(self, batch, batch_idx):
+        # DataLoader 可能返回 3 元组或 4 元组；无论是否带 depth，都只将图像喂给网络，
+        # 深度由 AdaIR 内部的 DepthAnythingV2 统一估计。
         if len(batch) == 4:
-            ([clean_name, de_id], degrad_patch, clean_patch, depth_map) = batch
-            restored = self.net(degrad_patch, depth_map)
-            # 启动时打印一次：确认 DataLoader 把深度图传进来了，ECCM 会执行
-            if self.current_epoch == 0 and batch_idx == 0 and getattr(self, "_depth_usage_logged", True) is True:
-                self._depth_usage_logged = False
-                print("\n[DataLoader] ✅ 本 run 使用 4 元组 batch，depth_map 已传入网络，ECCM 会参与前向与反传。\n")
+            ([clean_name, de_id], degrad_patch, clean_patch, _depth_map) = batch
         else:
             ([clean_name, de_id], degrad_patch, clean_patch) = batch
-            restored = self.net(degrad_patch)
-            if self.current_epoch == 0 and batch_idx == 0 and getattr(self, "_depth_usage_logged", True) is True:
-                self._depth_usage_logged = False
-                print("\n[DataLoader] ⚠️ 本 run 使用 3 元组 batch，depth_map 始终为 None，ECCM 不会执行！若需训练 ECCM，请使用 --train_uie_only 及带 depth 的数据。\n")
+        restored = self.net(degrad_patch)
 
         loss = self.loss_fn(restored, clean_patch)
 
@@ -117,65 +150,78 @@ class AdaIRModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """验证一步：与 training_step 一致的前向与 loss，用于 UIE 等有 val_loader 的场景。"""
         if len(batch) == 4:
-            ([_, _], degrad_patch, clean_patch, depth_map) = batch
-            restored = self.net(degrad_patch, depth_map)
+            ([_, _], degrad_patch, clean_patch, _depth_map) = batch
         else:
             ([_, _], degrad_patch, clean_patch) = batch
-            restored = self.net(degrad_patch)
+        restored = self.net(degrad_patch)
         loss = self.loss_fn(restored, clean_patch)
         self.log("val_loss", loss, on_step=False, on_epoch=True)
         return loss
 
     def configure_optimizers(self):
-        print("\n" + "🚀"*15)
-        print("[路线 B] 启动硬核模式：全网络从零开始训练 (Train from Scratch)！")
-        
+        # 冻结的 depth_estimator 不参与优化；其余参数按“主干 + ECCM”分组
+        eccm_params = []
+        base_params = []
+        for name, param in self.net.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "eccm" in name.lower():
+                eccm_params.append(param)
+            else:
+                base_params.append(param)
+
+        print("\n[Optim] 使用双学习率：Base 1e-5, ECCM 1e-4")
+        print(f"[Optim] Base 参数张量数: {len(base_params)} | ECCM 参数张量数: {len(eccm_params)}")
+
         weight_decay = 1e-4
-        
-        # 如果命令行指定了固定 LR，则走固定路线（不推荐从头训练时使用）
+
+        # 如果命令行指定了固定 LR，则覆盖分组学习率，仍沿用参数分组
         if self.lr is not None:
-            optimizer = optim.AdamW(self.parameters(), lr=self.lr, weight_decay=weight_decay)
-            print(f"[LR] ⚠️ 警告: 使用了固定全局学习率: {self.lr} (无退火)")
+            optimizer = optim.AdamW(
+                [
+                    {"params": base_params, "lr": self.lr},
+                    {"params": eccm_params, "lr": self.lr},
+                ],
+                weight_decay=weight_decay,
+            )
+            print(f"[LR] 使用固定全局学习率: {self.lr}")
             return [optimizer]
-            
-        # ==========================================
-        # 核心：标准 Transformer 从头训练调度策略
-        # ==========================================
-        # 全局大初始学习率，适用于随机初始化的模型快速收敛
-        base_lr = 4e-4 
-        
-        # 所有人一视同仁，统一步伐
-        optimizer = optim.AdamW(self.parameters(), lr=base_lr, weight_decay=weight_decay)
-        
-        # 动态获取 trainer 中设置的总 epoch 数，保证余弦退火周期完美贴合
-        max_epochs = self.trainer.max_epochs if self.trainer is not None else 180
-        warmup_epochs = 15 # 前 15 个 epoch 热身，防止初始梯度爆炸
-        
-        # 使用代码中已有的调度器
-        scheduler = LinearWarmupCosineAnnealingLR(
-            optimizer=optimizer, 
-            warmup_epochs=warmup_epochs, 
-            max_epochs=max_epochs
+
+        optimizer = optim.AdamW(
+            [
+                {"params": base_params, "lr": 1e-5},
+                {"params": eccm_params, "lr": 1e-4},
+            ],
+            weight_decay=weight_decay,
         )
-        
-        print(f"[LR] ✅ 全局大初始学习率: {base_lr}")
-        print(f"[LR] ✅ 启用余弦退火调度器: Warmup {warmup_epochs} epochs, 总 {max_epochs} epochs")
-        print("🚀"*15 + "\n")
-        
-        return [optimizer], [scheduler]
+        # lr=None 时启用 warmup + cosine 学习率衰减
+        max_epochs = self._max_epochs if self._max_epochs is not None else (getattr(self.trainer, "max_epochs", None) if self.trainer else 150)
+        warmup_epochs = min(10, max(1, max_epochs // 15))
+        scheduler = LinearWarmupCosineAnnealingLR(
+            optimizer,
+            warmup_epochs=warmup_epochs,
+            max_epochs=max_epochs,
+            warmup_start_lr=0.0,
+            eta_min=1e-7,
+        )
+        print(f"[LR] 动态学习率: warmup {warmup_epochs} epoch, 共 {max_epochs} epoch, cosine 衰减至 eta_min=1e-7")
+        return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 
     def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
-        # 梯度探针：检查 ECCM 最后一层梯度是否存活（backward 后、step 前）
-        if hasattr(self.net, "eccm") and hasattr(self.net.eccm, "depth_projector"):
-            last_layer = self.net.eccm.depth_projector[-1]
-            w = last_layer.weight
-            if w.grad is None:
-                print("🚨 警报：ECCM 最后一层梯度为 None")
-            else:
-                abs_mean = w.grad.abs().mean().item()
-                print("✅ ECCM 梯度存活，Abs Mean: {:.6f}".format(abs_mean))
-        # 梯度裁剪，防止梯度假死/爆炸
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.01)
+        # 梯度探针：每 100 step 打印一次 ECCM 梯度状态，避免刷屏
+        if self.trainer is not None and self.trainer.global_step % 100 == 0:
+            if hasattr(self.net, "eccm") and hasattr(self.net.eccm, "depth_projector"):
+                last_layer = self.net.eccm.depth_projector[-1]
+                w = last_layer.weight
+                if w.grad is None:
+                    print("🚨 [step {}] ECCM 最后一层梯度为 None".format(self.trainer.global_step))
+                else:
+                    abs_mean = w.grad.abs().mean().item()
+                    print("✅ [step {}] ECCM 梯度存活，Abs Mean: {:.6f}".format(self.trainer.global_step, abs_mean))
+        # 梯度裁剪，防止梯度假死/爆炸（与 --grad_clip 一致，避免 0.01 过小导致梯度被压死）
+        max_norm = getattr(self, "grad_clip", 0.5)
+        if max_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=max_norm)
 
 
 def main():
@@ -258,7 +304,11 @@ def main():
         save_top_k=1,
         save_last=False,
     )
-    model = AdaIRModel(lr=opt.lr)
+    model = AdaIRModel(
+        lr=opt.lr,
+        max_epochs=opt.epochs,
+        grad_clip=getattr(opt, "grad_clip", 0.5),
+    )
 
     if getattr(opt, "resume_ckpt", None):
         info = load_adair_ckpt_for_uie_finetune(

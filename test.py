@@ -11,6 +11,9 @@ from net.model import AdaIR
 from utils.val_utils import AverageMeter, compute_psnr_ssim
 from utils.image_utils import crop_img
 
+# 验证集定性可视化保存目录
+VIS_DIR = "output/visualization"
+
 
 class AdaIRModel(pl.LightningModule):
     def __init__(self):
@@ -89,24 +92,93 @@ class UIETestDataset(Dataset):
         return [name], degrad, clean, depth
 
 
+def _tensor_to_uint8_rgb(x):
+    """(1,3,H,W) or (1,1,H,W) -> (H,W,3) uint8。单通道会复制为 3 通道便于拼接。"""
+    x = x.squeeze(0)
+    if x.dim() == 2:
+        x = x.unsqueeze(0).expand(3, -1, -1)
+    elif x.shape[0] == 1:
+        x = x.expand(3, -1, -1)
+    x = x.permute(1, 2, 0).cpu().numpy()
+    x = (np.clip(x, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return x
+
+
+def _scale_to_heatmap_uint8(scale, dim=1):
+    """scale (1,C,H,W) -> 通道均值 abs -> 热力图 (H,W,3) uint8。"""
+    heat = torch.mean(scale.abs(), dim=dim).squeeze(0).cpu().numpy()
+    heat = np.clip(heat, 0.0, None)
+    if heat.max() > heat.min() + 1e-6:
+        heat = (heat - heat.min()) / (heat.max() - heat.min())
+    else:
+        heat = np.zeros_like(heat)
+    heat = (heat * 255.0).astype(np.uint8)
+    try:
+        import cv2
+        heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+        heat = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB)
+    except Exception:
+        heat = np.stack([heat, heat, heat], axis=-1)
+    return heat
+
+
 def test_UIE(net, dataset, dataset_name="UIE"):
     psnr = AverageMeter()
     ssim = AverageMeter()
     net.eval()
+    os.makedirs(VIS_DIR, exist_ok=True)
     with torch.no_grad():
         for i in tqdm(range(len(dataset)), desc=dataset_name):
-            [name], degrad, clean, depth_map = dataset[i]
+            [name], degrad, clean, _ = dataset[i]
             degrad = degrad.cuda()
             clean = clean.cuda()
-            if depth_map is not None:
-                depth_map = depth_map.cuda()
-                restored = net(degrad, depth_map)
+            # 每组数据集的第 1 张图：带 return_aux 取深度与 ECCM scale，并保存可视化
+            if i == 0:
+                out = net(degrad, return_aux=True)
+                if isinstance(out, tuple):
+                    restored, aux = out
+                else:
+                    restored = out
+                    aux = {}
             else:
                 restored = net(degrad)
+                aux = {}
             restored = torch.clamp(restored, 0, 1)
             temp_psnr, temp_ssim, N = compute_psnr_ssim(restored, clean)
             psnr.update(temp_psnr, N)
             ssim.update(temp_ssim, N)
+
+            # 第 1 张图：拼接 [原图, 深度图, ECCM_Scale_Heatmap, 恢复图, GT] 并保存
+            # eccm_scale 来自 AdaIR 的 aux，即 ECCM.forward 的返回值：scale = torch.tanh(depth_projector(depth_map))，为 tanh 后的调制系数
+            if i == 0 and aux:
+                depth_map = aux.get("depth_map")
+                eccm_scale = aux.get("eccm_scale")  # 已是 depth_projector → tanh 后的 scale，非中间层
+                # 原图、恢复图、GT：(1,3,H,W) -> (H,W,3)
+                im_input = _tensor_to_uint8_rgb(degrad)
+                im_restored = _tensor_to_uint8_rgb(restored)
+                im_gt = _tensor_to_uint8_rgb(clean)
+                h, w = im_input.shape[0], im_input.shape[1]
+                if depth_map is not None:
+                    im_depth = _tensor_to_uint8_rgb(depth_map)
+                else:
+                    im_depth = np.zeros((h, w, 3), dtype=np.uint8)
+                if eccm_scale is not None:
+                    im_scale = _scale_to_heatmap_uint8(eccm_scale, dim=1)
+                else:
+                    im_scale = np.zeros((h, w, 3), dtype=np.uint8)
+                # 统一缩放到原图尺寸后拼接（depth/scale 可能为 H/8,W/8）
+                def _resize_to_hw(arr, target_h, target_w):
+                    if arr.shape[0] == target_h and arr.shape[1] == target_w:
+                        return arr
+                    return np.array(Image.fromarray(arr).resize((target_w, target_h)))
+                im_depth = _resize_to_hw(im_depth, h, w)
+                im_scale = _resize_to_hw(im_scale, h, w)
+                im_restored = _resize_to_hw(im_restored, h, w)
+                im_gt = _resize_to_hw(im_gt, h, w)
+                row = np.concatenate([im_input, im_depth, im_scale, im_restored, im_gt], axis=1)
+                out_path = os.path.join(VIS_DIR, "{}_first_input_depth_scale_restored_gt.png".format(dataset_name))
+                Image.fromarray(row).save(out_path)
+                print("[Visualization] saved: {}".format(out_path))
     print("{}: PSNR: {:.2f}, SSIM: {:.4f}".format(dataset_name, psnr.avg, ssim.avg))
     return psnr.avg, ssim.avg
 
@@ -114,14 +186,24 @@ def test_UIE(net, dataset, dataset_name="UIE"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cuda", type=int, default=0)
-    parser.add_argument("--ckpt_path", type=str, default="ckpt/adair5d.ckpt", help="checkpoint path")
+    parser.add_argument("--ckpt_path", type=str, default="ckpt/adair5d.ckpt",
+                        help="AdaIR 训练得到的 Lightning 检查点 (.ckpt)，非 DepthAnythingV2 的 .pth")
     parser.add_argument("--uie_test_dir", type=str, default="data/test/uie/",
                         help="UIE test root, expect uieb/lsui/euvp with input/ and target/")
     args = parser.parse_args()
 
     torch.cuda.set_device(args.cuda)
 
-    net = AdaIRModel.load_from_checkpoint(args.ckpt_path).net.cuda()
+    # --ckpt_path 必须是「训练得到的 AdaIR Lightning 检查点」(.ckpt)，不是 DepthAnythingV2 的 .pth
+    # strict=False：旧 ckpt 可能不含 net.depth_estimator，缺失的键保留为 __init__ 中已加载的 DepthAnythingV2 权重
+    try:
+        net = AdaIRModel.load_from_checkpoint(args.ckpt_path, strict=False).net.cuda()
+    except KeyError as e:
+        if "pytorch-lightning_version" in str(e) or "state_dict" in str(e):
+            print("错误: 您传入的不是 Lightning 检查点，无法用 load_from_checkpoint 加载。")
+            print("  --ckpt_path 应指向「训练保存的 AdaIR 模型」例如: ckpt/best_ckpt/best_psnr-xxx.ckpt")
+            print("  不要传入 DepthAnythingV2 的权重路径（如 depth_anything_v2_vits.pth），该权重在 AdaIR 初始化时已自动从 ckpt/DepthAnythingv2/ 加载。")
+        raise
     net.eval()
 
     # 相对路径以脚本所在目录为基准，避免 cwd 不同导致找不到数据

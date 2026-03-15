@@ -7,7 +7,10 @@
 ## 一、当前数据流（与 forward 一致）
 
 ```
-inp_img (B,3,H,W) [+ depth_map (B,1,H,W) 可选]
+inp_img (B,3,H,W)   ← 唯一输入，无外部深度
+    │
+    ▼
+depth_map = _estimate_depth(inp_img)   ← 内部：灰度化 → DepthAnythingV2(no_grad) → min-max 归一化 [0,1]，(B,1,H,W)；若无 DAV2 则全 0.5
     │
     ▼
 patch_embed(inp_img)  →  feat (B,48,H,W)
@@ -34,7 +37,7 @@ down3_4  →  inp_enc_level4 (B,384,H/8,W/8)
 latent(inp_enc_level4)  →  feat (B,384,H/8,W/8)
     │
     ▼
-若 depth_map 非空:  eccm(feat, depth_map)  →  feat (B,384,H/8,W/8)   ← 深层色彩校正
+eccm(feat, depth_map)  →  feat (B,384,H/8,W/8)   ← 深层色彩校正，depth 内部 interpolate 到 H/8×W/8
     │
     ▼
 若 decoder:  fre1(inp_img, feat, depth_map)  →  feat (B,384,H/8,W/8)
@@ -64,6 +67,7 @@ refinement(out_dec_level1)  →  output(·) + inp_img  →  out (B,3,H,W)
 
 | 阶段 | 子模块 | 说明 | 输入 → 输出 (B,C,H,W) |
 |------|--------|------|------------------------|
+| 深度 | **depth_estimator** | DepthAnythingV2 ViT-Small（冻结），灰度图→深度→[0,1] | 内部 _estimate_depth(inp_img) → (B,1,H,W) |
 | 入口 | **patch_embed** | OverlapPatchEmbed(3→48), 3×3 conv | (B,3,H,W) → (B,48,H,W) |
 | Enc L1 | **encoder_level1** | 4× TransformerBlock(dim=48, heads=1) | (B,48,H,W) |
 | ↓ | **down1_2** | Downsample: Conv3×3 + PixelUnshuffle(2) | (B,48,H,W) → (B,96,H/2,W/2) |
@@ -72,8 +76,8 @@ refinement(out_dec_level1)  →  output(·) + inp_img  →  out (B,3,H,W)
 | Enc L3 | **encoder_level3** | 6× TransformerBlock(dim=192, heads=4) | (B,192,H/4,W/4) |
 | ↓ | **down3_4** | Downsample | (B,192) → (B,384,H/8,W/8) |
 | 瓶颈 | **latent** | 8× TransformerBlock(dim=384, heads=8) | (B,384,H/8,W/8) |
-| 瓶颈 | **eccm** | EarlyColorCorrectionModule(384)，仅当 depth_map 非空 | (B,384,H/8,W/8) → (B,384,H/8,W/8)，depth 内部 interpolate 到 H/8×W/8 |
-| 瓶颈 | **fre1** | FreModule(384)，可选 depth_map | (B,384,H/8,W/8) |
+| 瓶颈 | **eccm** | EarlyColorCorrectionModule(384)，始终用内部 depth_map | (B,384,H/8,W/8) → (B,384,H/8,W/8)，depth 内部 interpolate 到 H/8×W/8 |
+| 瓶颈 | **fre1** | FreModule(384)，使用内部 depth_map 做 sft_low/sft_high | (B,384,H/8,W/8) |
 | 上采样 | **up4_3** | Upsample | (B,384) → (B,192,H/4,W/4) |
 | | **reduce_chan_level3** | Conv2d(384→192, 1×1) | concat 后 384→192 |
 | Dec L3 | **decoder_level3** | 6× TransformerBlock(192) | (B,192,H/4,W/4) |
@@ -97,6 +101,7 @@ refinement(out_dec_level1)  →  output(·) + inp_img  →  out (B,3,H,W)
 
 ```
 AdaIR
+├── depth_estimator      DepthAnythingV2(encoder='vits', features=64, out_channels=[48,96,192,384])，冻结，可选
 ├── patch_embed          OverlapPatchEmbed(3, 48)
 ├── encoder_level1      Sequential[ 4 × TransformerBlock(48, heads=1) ]
 ├── down1_2              Downsample(48)
@@ -202,7 +207,7 @@ SpatialFeatureTransform(channels)
 | L2 后 | 128×128 | 96 |
 | L3 后 | 64×64 | 192 |
 | latent 后 | 32×32 | 384 |
-| eccm（若用 depth） | 32×32 | 384 |
+| eccm（内部 depth） | 32×32 | 384 |
 | fre1 后 | 32×32 | 384 |
 | 上采样 + L3 解码 | 64×64 | 192 |
 | fre2 后 | 64×64 | 192 |
@@ -215,9 +220,6 @@ SpatialFeatureTransform(channels)
 ## 五、forward 接口
 
 ```python
-# 带深度（UIE 等）：ECCM 在 latent 后执行，FreModule 使用 depth_map
-out = net(inp_img, depth_map)   # depth_map: (B,1,H,W), 0~1
-
-# 无深度：不执行 ECCM，FMoM 中不执行 SFT 与深度门控
-out = net(inp_img)              # depth_map=None
+# 仅需输入图像；深度在内部由 DepthAnythingV2 估计，供 ECCM 与 FreModule 使用
+out = net(inp_img)   # inp_img: (B,3,H,W)；可选 noise_emb 未使用
 ```
